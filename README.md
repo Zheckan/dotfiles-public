@@ -122,7 +122,7 @@ Modules are organized by area:
 - `cli/`: shell, Git, SSH, and miscellaneous CLI setup scripts
 - `languages/`: Node and Python setup/package backup scripts
 - `macos/`: macOS `defaults` automation
-- `fonts/`: font setup through Homebrew-managed casks
+- `fonts/`: Homebrew-managed font casks plus a user-backed `fonts/user/` directory for fonts without a cask equivalent
 - `history/`: shell history backup script
 - `auto-backup/`: scheduled backup and PR automation
 
