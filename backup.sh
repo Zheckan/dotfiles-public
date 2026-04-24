@@ -24,6 +24,7 @@ run_backup() {
 }
 
 run_backup "Apps (Brewfile)"       "$DOTFILES_DIR/apps/backup.sh"
+run_backup "Fonts"                 "$DOTFILES_DIR/fonts/backup.sh"
 run_backup "Shell"                 "$DOTFILES_DIR/cli/shell/backup.sh"
 run_backup "Git"                   "$DOTFILES_DIR/cli/git/backup.sh"
 run_backup "Terminal (Ghostty)"    "$DOTFILES_DIR/apps/terminal/ghostty/backup.sh"
