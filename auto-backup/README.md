@@ -19,8 +19,8 @@ Without it, notifications fall back to `osascript` (no click-to-open).
 Each device gets its own branch, auto-detected from hardware:
 
 ```
-device/MacBookPro-AB/alice      ← personal MacBook Pro (serial ending "AB")
-device/MacBookAir-X2/work       ← hypothetical work laptop
+device/{model}-{serial-suffix}/{username}
+device/{model}-{serial-suffix}/work
 ```
 
 Branch name format: `device/{ModelName}-{SerialSuffix}/{username}`
