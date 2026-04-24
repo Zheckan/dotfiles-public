@@ -1,18 +1,25 @@
 # Dotfiles Public Scripts
 
-This repository is a public scripts-only shell of a private macOS dotfiles repo.
-The private repo stores personal configuration snapshots; this public mirror keeps
-only the reusable automation scripts and public-safe documentation.
+## Before You Clone And Read Further
+
+- There is a 99% chance a better open-source solution already exists.
+- This is a very specific nerd thing and you probably do not need it.
+- This may not work for you or your machine. It is highly personal and probably too hardcoded.
+- This may not support backup for what you need, but you have a template. Figure it out and submit a PR if you really need it.
+
+This repository is a public scripts-only shell of my private macOS dotfiles repo.
+Things are auto-backed up when I update or add new scripts, so be careful.
 
 The scripts are personal and opinionated, but they can be useful as a reference or
-as a starting point for your own macOS dotfiles workflow. Read before running.
+as a starting point for your own macOS dotfiles workflow. **Read before running.**
 
 ## Current Status
 
-- Backup scripts are the actively used and tested path.
-- Install/restore scripts exist, but they have not been fully tested end-to-end.
+- Backup scripts are the actively used path and are tested on my personal machine.
+- Install/restore scripts exist, but they have not been tested on a new machine.
 - The private configuration files these scripts normally manage are not included here.
 - Some scripts assume specific macOS app locations and command-line tools.
+- The shell module is for Zsh and Oh My Zsh. Other shells need their own module.
 
 ## Requirements
 
@@ -30,7 +37,7 @@ Optional tools used by specific modules:
 - `terminal-notifier` for clickable macOS notifications
 - `jq`, `python3`, and `rsync` for config processing/syncing
 - `mas` for Mac App Store app management through Homebrew Bundle
-- `claude` for local PR review in the private auto-backup flow
+- `claude` plus an active Claude subscription/login for local PR review in the private auto-backup flow
 - `code`, `cursor`, and app-specific CLIs for editor backups
 - `npm`, `pnpm`, `pip`, and related language tools for package backups
 
@@ -42,6 +49,72 @@ Optional tools used by specific modules:
 - `auto-backup/run-backup.sh` launches the auto-backup flow.
 - `auto-backup/auto-commit.sh` backs up, commits to a device branch, and can open,
   review, and merge a PR in the private repo.
+
+Auto-backup flags:
+
+- no flag: rebase, run backup, commit, and push to a device branch
+- `--main-pc`: backup, create/reuse PR, run Claude review, and squash-merge if approved
+- `--pr-only`: backup, create/reuse PR, and run review without merging
+- `--test`: push/review the current branch without backup or merge
+- `--no-rebase`: skip rebasing on `main`
+- `--no-review`: skip Claude review
+
+The Claude review/auto-merge path requires `gh` auth, `claude` CLI auth, and a Claude
+setup that can run `claude -p`. If that is not available, the PR stays open for manual
+review.
+
+## Auto-Backup Setup
+
+There are three ways to use auto-backup.
+
+Manual run:
+
+```bash
+./auto-backup/run-backup.sh
+```
+
+Primary-machine run with PR review and merge:
+
+```bash
+./auto-backup/run-backup.sh --main-pc
+```
+
+Install the LaunchAgent if you want a background schedule:
+
+```bash
+./auto-backup/install.sh
+```
+
+This writes `~/Library/LaunchAgents/com.dotfiles.autocommit.plist` and runs every two
+days by default. Remove it with:
+
+```bash
+./auto-backup/uninstall.sh
+```
+
+Use Apple Shortcuts if you want a visible macOS automation instead:
+
+```bash
+./auto-backup/install-shortcut.sh
+```
+
+For non-interactive runners like LaunchAgent or Shortcuts, set at least
+`DOTFILES_REPO_DIR` explicitly if the repo is not in the expected location:
+
+```bash
+export DOTFILES_REPO_DIR="$HOME/Developer/dotfiles"
+```
+
+For `--main-pc`, authenticate first:
+
+```bash
+gh auth login
+claude
+```
+
+The script creates a device branch like `device/{model}-{serial-suffix}/{username}`,
+pushes the backup commit there, creates or reuses a PR to `main`, asks Claude to
+review the diff, and squash-merges only when the review starts with `APPROVED`.
 
 Modules are organized by area:
 
@@ -85,3 +158,9 @@ them, set required environment variables inside the launcher or load them explic
 - Review install scripts before running them; they may overwrite local config.
 - Keep secrets, SSH config, tokens, app exports, and shell history private.
 - Treat this repo as reference code unless you have adapted it to your machine.
+
+## License And Small Fee
+
+There is a small fee for using this content: donate to [Come Back Alive](https://savelife.in.ua/en/donate-en/). Donate anything. As [Max Shcherbyna](https://twitter.com/max_shcherbyna) said: "Donate is like a penis, there isn't small one."
+
+This project is licensed under the MIT License - see the LICENSE file for details. Just don't be cunts, and do not support Russia's war against Ukraine.
