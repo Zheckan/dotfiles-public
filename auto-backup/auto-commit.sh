@@ -7,28 +7,266 @@ eval "$(/opt/homebrew/bin/brew shellenv 2>/dev/null)" || true
 export PATH="$HOME/.nvm/versions/node/$(ls "$HOME/.nvm/versions/node/" 2>/dev/null | tail -1)/bin:$PATH" 2>/dev/null || true
 export PATH="/usr/local/bin:$HOME/.local/bin:$PATH"
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+trim() {
+  local value="$1"
+  value="${value#"${value%%[![:space:]]*}"}"
+  value="${value%"${value##*[![:space:]]}"}"
+  printf '%s' "$value"
+}
+
+split_csv_lines() {
+  local csv="$1"
+  local item
+
+  while :; do
+    if [[ "$csv" == *,* ]]; then
+      item="${csv%%,*}"
+      csv="${csv#*,}"
+    else
+      item="$csv"
+      csv=
+    fi
+
+    item="$(trim "$item")"
+    printf '%s\n' "$item"
+
+    [[ -z "$csv" ]] && break
+  done
+}
+
+config_error() {
+  printf 'auto-commit: invalid config: %s\n' "$*" >&2
+  exit 2
+}
+
+is_allowed_config_key() {
+  case "$1" in
+    DOTFILES_AUTOBACKUP_MODE|DOTFILES_AUTOBACKUP_REBASE|DOTFILES_AUTOBACKUP_REVIEW|DOTFILES_REVIEWERS|DOTFILES_REVIEW_CLAUDE_MODELS|DOTFILES_REVIEW_CODEX_MODELS|DOTFILES_REVIEW_GEMINI_MODELS|DOTFILES_REVIEW_OPENCODE_MODELS|DOTFILES_REVIEW_CURSOR_MODELS|DOTFILES_REVIEW_OLLAMA_MODELS)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+decode_config_value() {
+  local raw_value="$1"
+  local value
+
+  raw_value="$(trim "$raw_value")"
+  if [[ "$raw_value" =~ ^\"([^\"\\]|\\.)*\"([[:space:]]*#.*)?$ ]]; then
+    value="${raw_value%%\"*}"
+    value="${raw_value#\"}"
+    value="${value%\"*}"
+  elif [[ "$raw_value" =~ ^\'[^\']*\'([[:space:]]*#.*)?$ ]]; then
+    value="${raw_value%%\'*}"
+    value="${raw_value#\'}"
+    value="${value%\'*}"
+  else
+    value="$(trim "${raw_value%%#*}")"
+  fi
+
+  printf '%s' "$value"
+}
+
+load_config_file() {
+  local file="$1"
+  local line trimmed key raw_value value
+  local line_no=0
+
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line_no=$((line_no + 1))
+    trimmed="$(trim "$line")"
+
+    [[ -z "$trimmed" ]] && continue
+    [[ "${trimmed:0:1}" == "#" ]] && continue
+
+    if [[ "$trimmed" =~ ^([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*=(.*)$ ]]; then
+      key="${BASH_REMATCH[1]}"
+      raw_value="${BASH_REMATCH[2]}"
+
+      is_allowed_config_key "$key" || config_error "$file:$line_no: unsupported key '$key'"
+      value="$(decode_config_value "$raw_value")"
+      printf -v "$key" '%s' "$value"
+    else
+      config_error "$file:$line_no: expected KEY=VALUE assignment"
+    fi
+  done < "$file"
+}
+
+# Tracked defaults plus optional local overrides.
+if [[ ! -f "$SCRIPT_DIR/config.env" ]]; then
+  config_error "missing auto-backup/config.env; run auto-backup/configure.sh or restore the tracked config"
+fi
+load_config_file "$SCRIPT_DIR/config.env"
+if [[ -f "$SCRIPT_DIR/config.local.env" ]]; then
+  load_config_file "$SCRIPT_DIR/config.local.env"
+fi
+
+DOTFILES_AUTOBACKUP_MODE="${DOTFILES_AUTOBACKUP_MODE:-}"
+DOTFILES_AUTOBACKUP_REBASE="${DOTFILES_AUTOBACKUP_REBASE:-}"
+DOTFILES_AUTOBACKUP_REVIEW="${DOTFILES_AUTOBACKUP_REVIEW:-}"
+DOTFILES_REVIEWERS="${DOTFILES_REVIEWERS:-}"
+DOTFILES_REVIEW_CLAUDE_MODELS="${DOTFILES_REVIEW_CLAUDE_MODELS:-}"
+DOTFILES_REVIEW_CODEX_MODELS="${DOTFILES_REVIEW_CODEX_MODELS:-}"
+DOTFILES_REVIEW_GEMINI_MODELS="${DOTFILES_REVIEW_GEMINI_MODELS:-}"
+
 # ── Flags ─────────────────────────────────────────────────────────
 # --main-pc    : Full flow — rebase, backup, review, PR, merge
 # --pr-only    : Same as --main-pc but without merge
 # --no-rebase  : Skip rebase on main (combinable with above)
-# --no-review  : Skip Claude review (combinable with above)
+# --no-review  : Skip AI review (combinable with above)
 # --test       : Test mode — stay on current branch, push, create PR, review (no backup, no merge)
-MAIN_PC=false
-PR_ONLY=false
-NO_REBASE=false
-NO_REVIEW=false
-TEST_MODE=false
+# --claude/--codex/--gemini/... : Reviewers to try, in flag order
+MODE_FLAG=""
+REBASE_FLAG=""
+REVIEW_FLAG=""
+REVIEWER_FLAGS=()
 for arg in "$@"; do
   case "$arg" in
-    --main-pc) MAIN_PC=true ;;
-    --pr-only) PR_ONLY=true ;;
-    --no-rebase) NO_REBASE=true ;;
-    --no-review) NO_REVIEW=true ;;
-    --test) TEST_MODE=true ;;
+    --main-pc) MODE_FLAG="main-pc" ;;
+    --pr-only) MODE_FLAG="pr-only" ;;
+    --no-rebase) REBASE_FLAG="false" ;;
+    --no-review) REVIEW_FLAG="false" ;;
+    --test) MODE_FLAG="test" ;;
+    --claude) REVIEWER_FLAGS+=("claude") ;;
+    --codex) REVIEWER_FLAGS+=("codex") ;;
+    --gemini) REVIEWER_FLAGS+=("gemini") ;;
+    --opencode) REVIEWER_FLAGS+=("opencode") ;;
+    --cursor) REVIEWER_FLAGS+=("cursor") ;;
+    --ollama) REVIEWER_FLAGS+=("ollama") ;;
   esac
 done
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+[[ -n "$MODE_FLAG" ]] && DOTFILES_AUTOBACKUP_MODE="$MODE_FLAG"
+[[ -n "$REBASE_FLAG" ]] && DOTFILES_AUTOBACKUP_REBASE="$REBASE_FLAG"
+[[ -n "$REVIEW_FLAG" ]] && DOTFILES_AUTOBACKUP_REVIEW="$REVIEW_FLAG"
+
+validate_boolean_config() {
+  local name="$1"
+  local value="$2"
+
+  case "$value" in
+    true|false) ;;
+    *) config_error "$name must be true or false (got: $value)" ;;
+  esac
+}
+
+validate_csv_nonempty() {
+  local name="$1"
+  local value="$2"
+  local item
+
+  [[ -n "$(trim "$value")" ]] || config_error "$name must not be empty"
+  case "$value" in
+    *,,*|*,|,*) config_error "$name must be a comma-separated list without empty items (got: $value)" ;;
+  esac
+
+  while IFS= read -r item; do
+    [[ -n "$item" ]] || config_error "$name must not contain empty items"
+  done < <(split_csv_lines "$value")
+}
+
+validate_reviewer_name() {
+  local reviewer="$1"
+
+  case "$reviewer" in
+    claude|codex|gemini|opencode|cursor|ollama) ;;
+    *) config_error "unknown reviewer '$reviewer' (allowed: claude, codex, gemini, opencode, cursor, ollama)" ;;
+  esac
+}
+
+validate_reviewers_config() {
+  local reviewer
+
+  if [[ "${#REVIEWER_FLAGS[@]}" -gt 0 ]]; then
+    for reviewer in "${REVIEWER_FLAGS[@]}"; do
+      validate_reviewer_name "$reviewer"
+    done
+    return 0
+  fi
+
+  validate_csv_nonempty "DOTFILES_REVIEWERS" "$DOTFILES_REVIEWERS"
+  while IFS= read -r reviewer; do
+    validate_reviewer_name "$reviewer"
+  done < <(split_csv_lines "$DOTFILES_REVIEWERS")
+}
+
+model_list_name_for_reviewer() {
+  case "$1" in
+    claude) printf 'DOTFILES_REVIEW_CLAUDE_MODELS' ;;
+    codex) printf 'DOTFILES_REVIEW_CODEX_MODELS' ;;
+    gemini) printf 'DOTFILES_REVIEW_GEMINI_MODELS' ;;
+    opencode) printf 'DOTFILES_REVIEW_OPENCODE_MODELS' ;;
+    cursor) printf 'DOTFILES_REVIEW_CURSOR_MODELS' ;;
+    ollama) printf 'DOTFILES_REVIEW_OLLAMA_MODELS' ;;
+  esac
+}
+
+model_list_value_for_reviewer() {
+  case "$1" in
+    claude) printf '%s' "${DOTFILES_REVIEW_CLAUDE_MODELS:-}" ;;
+    codex) printf '%s' "${DOTFILES_REVIEW_CODEX_MODELS:-}" ;;
+    gemini) printf '%s' "${DOTFILES_REVIEW_GEMINI_MODELS:-}" ;;
+    opencode) printf '%s' "${DOTFILES_REVIEW_OPENCODE_MODELS:-}" ;;
+    cursor) printf '%s' "${DOTFILES_REVIEW_CURSOR_MODELS:-}" ;;
+    ollama) printf '%s' "${DOTFILES_REVIEW_OLLAMA_MODELS:-}" ;;
+  esac
+}
+
+validate_selected_model_lists() {
+  local reviewer name value
+
+  if [[ "${#REVIEWER_FLAGS[@]}" -gt 0 ]]; then
+    for reviewer in "${REVIEWER_FLAGS[@]}"; do
+      name="$(model_list_name_for_reviewer "$reviewer")"
+      value="$(model_list_value_for_reviewer "$reviewer")"
+      [[ -z "$(trim "$value")" ]] || validate_csv_nonempty "$name" "$value"
+    done
+    return 0
+  fi
+
+  while IFS= read -r reviewer; do
+    [[ -n "$reviewer" ]] || continue
+    name="$(model_list_name_for_reviewer "$reviewer")"
+    value="$(model_list_value_for_reviewer "$reviewer")"
+    [[ -z "$(trim "$value")" ]] || validate_csv_nonempty "$name" "$value"
+  done < <(split_csv_lines "$DOTFILES_REVIEWERS")
+}
+
+validate_config() {
+  case "$DOTFILES_AUTOBACKUP_MODE" in
+    device-only|main-pc|pr-only|test) ;;
+    *) config_error "DOTFILES_AUTOBACKUP_MODE must be device-only, main-pc, pr-only, or test (got: $DOTFILES_AUTOBACKUP_MODE)" ;;
+  esac
+
+  validate_boolean_config "DOTFILES_AUTOBACKUP_REBASE" "$DOTFILES_AUTOBACKUP_REBASE"
+  validate_boolean_config "DOTFILES_AUTOBACKUP_REVIEW" "$DOTFILES_AUTOBACKUP_REVIEW"
+  [[ "$DOTFILES_AUTOBACKUP_REVIEW" == "false" ]] && return 0
+
+  validate_reviewers_config
+  validate_selected_model_lists
+}
+
+validate_config
+
+MAIN_PC=false
+PR_ONLY=false
+TEST_MODE=false
+case "$DOTFILES_AUTOBACKUP_MODE" in
+  main-pc) MAIN_PC=true ;;
+  pr-only) PR_ONLY=true ;;
+  test) TEST_MODE=true ;;
+esac
+
+NO_REBASE=false
+NO_REVIEW=false
+[[ "$DOTFILES_AUTOBACKUP_REBASE" == "false" ]] && NO_REBASE=true
+[[ "$DOTFILES_AUTOBACKUP_REVIEW" == "false" ]] && NO_REVIEW=true
+
 DEFAULT_REPO_DIR="$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel 2>/dev/null || (cd "$SCRIPT_DIR/.." && pwd))"
 DOTFILES_REPO_DIR="${DOTFILES_REPO_DIR:-$DEFAULT_REPO_DIR}"
 DOTFILES_LOG_DIR="${DOTFILES_LOG_DIR:-$HOME/Library/Logs/dotfiles}"
@@ -89,136 +327,426 @@ notify_success() {
   fi
 }
 
-# ── PR Review (Claude Code) ──────────────────────────────────────
-# Reviews the PR diff using claude CLI before allowing merge.
-# Posts the review as a PR comment. Returns 0 if approved, 1 otherwise.
+# ── PR Review (AI reviewer adapters) ─────────────────────────────
+# Reviews the PR diff before allowing merge. Returns 0 if approved, 1 otherwise.
+reviewer_display_name() {
+  case "$1" in
+    claude) printf 'Claude' ;;
+    codex) printf 'Codex' ;;
+    gemini) printf 'Gemini' ;;
+    opencode) printf 'OpenCode' ;;
+    cursor) printf 'Cursor' ;;
+    ollama) printf 'Ollama' ;;
+    *) printf '%s' "$1" ;;
+  esac
+}
+
+reviewer_url() {
+  case "$1" in
+    claude) printf 'https://claude.com/claude-code' ;;
+    codex) printf 'https://developers.openai.com/codex' ;;
+    gemini) printf 'https://github.com/google-gemini/gemini-cli' ;;
+    opencode) printf 'https://opencode.ai' ;;
+    cursor) printf 'https://cursor.com' ;;
+    ollama) printf 'https://ollama.com' ;;
+  esac
+}
+
+reviewer_command() {
+  case "$1" in
+    claude) printf 'claude' ;;
+    codex) printf 'codex' ;;
+    gemini) printf 'gemini' ;;
+    opencode) printf 'opencode' ;;
+    cursor) printf 'cursor' ;;
+    ollama) printf 'ollama' ;;
+  esac
+}
+
+configured_reviewers() {
+  local reviewer
+
+  if [[ "${#REVIEWER_FLAGS[@]}" -gt 0 ]]; then
+    for reviewer in "${REVIEWER_FLAGS[@]}"; do
+      printf '%s\n' "$reviewer"
+    done
+    return 0
+  fi
+
+  if [[ -n "${DOTFILES_REVIEWERS:-}" ]]; then
+    split_csv_lines "$DOTFILES_REVIEWERS"
+    return 0
+  fi
+}
+
+models_for_reviewer() {
+  local reviewer="$1"
+  local _prompt_file="$2"
+  local raw=""
+
+  case "$reviewer" in
+    claude) raw="${DOTFILES_REVIEW_CLAUDE_MODELS:-}" ;;
+    codex) raw="${DOTFILES_REVIEW_CODEX_MODELS:-}" ;;
+    gemini) raw="${DOTFILES_REVIEW_GEMINI_MODELS:-}" ;;
+    opencode) raw="${DOTFILES_REVIEW_OPENCODE_MODELS:-}" ;;
+    cursor) raw="${DOTFILES_REVIEW_CURSOR_MODELS:-}" ;;
+    ollama) raw="${DOTFILES_REVIEW_OLLAMA_MODELS:-}" ;;
+  esac
+
+  if [[ -n "$raw" ]]; then
+    split_csv_lines "$raw"
+    return 0
+  fi
+
+  printf 'default\n'
+}
+
+first_review_line() {
+  sed '/^[[:space:]]*$/d' | head -1
+}
+
+write_pr_body() {
+  local pr_number="$1"
+  local body="$2"
+  local tmp_body
+
+  tmp_body="$(mktemp)"
+  printf '%s\n' "$body" > "$tmp_body"
+  gh pr edit "$pr_number" --body-file "$tmp_body" > /dev/null 2>&1
+  rm -f "$tmp_body"
+}
+
+parse_claude_json_review() {
+  local json_file="$1"
+  local review_file="$2"
+  local model_file="$3"
+
+  python3 - "$json_file" "$review_file" "$model_file" <<'PY' 2>/dev/null
+import json
+import re
+import sys
+
+json_file, review_file, model_file = sys.argv[1:4]
+with open(json_file, "r", encoding="utf-8") as fh:
+    data = json.load(fh)
+
+result = data.get("result") or ""
+model_usage = data.get("modelUsage") or {}
+model = next(iter(model_usage), "")
+model = re.sub(r"\[[^\]]+\]$", "", model)
+
+with open(review_file, "w", encoding="utf-8") as fh:
+    fh.write(result)
+with open(model_file, "w", encoding="utf-8") as fh:
+    fh.write(model)
+PY
+}
+
+parse_gemini_json_review() {
+  local json_file="$1"
+  local review_file="$2"
+  local model_file="$3"
+
+  python3 - "$json_file" "$review_file" "$model_file" <<'PY' 2>/dev/null
+import json
+import sys
+
+json_file, review_file, model_file = sys.argv[1:4]
+with open(json_file, "r", encoding="utf-8") as fh:
+    data = json.load(fh)
+
+response = data.get("response") or ""
+models = ((data.get("stats") or {}).get("models") or {})
+model = ""
+for name, stats in models.items():
+    if "main" in ((stats or {}).get("roles") or {}):
+        model = name
+        break
+if not model and models:
+    model = next(iter(models))
+
+with open(review_file, "w", encoding="utf-8") as fh:
+    fh.write(response)
+with open(model_file, "w", encoding="utf-8") as fh:
+    fh.write(model)
+PY
+}
+
+read_codex_default_model() {
+  local config_file="${CODEX_HOME:-$HOME/.codex}/config.toml"
+
+  [[ -f "$config_file" ]] || return 1
+  awk -F= '
+    /^[[:space:]]*model[[:space:]]*=/ {
+      value=$2
+      sub(/^[[:space:]]*/, "", value)
+      sub(/[[:space:]]*$/, "", value)
+      gsub(/^"|"$/, "", value)
+      if (value != "") {
+        print value
+        exit 0
+      }
+    }
+  ' "$config_file"
+}
+
+parse_codex_json_review() {
+  local jsonl_file="$1"
+  local review_file="$2"
+
+  python3 - "$jsonl_file" "$review_file" <<'PY' 2>/dev/null
+import json
+import sys
+
+jsonl_file, review_file = sys.argv[1:3]
+messages = []
+with open(jsonl_file, "r", encoding="utf-8") as fh:
+    for raw in fh:
+        raw = raw.strip()
+        if not raw:
+            continue
+        try:
+            event = json.loads(raw)
+        except Exception:
+            continue
+        item = event.get("item") or {}
+        if event.get("type") == "item.completed" and item.get("type") == "agent_message":
+            text = item.get("text") or ""
+            if text:
+                messages.append(text)
+
+with open(review_file, "w", encoding="utf-8") as fh:
+    fh.write("\n".join(messages))
+PY
+}
+
+run_claude_review() {
+  local model="$1"
+  local prompt="$2"
+  local diff="$3"
+  local actual_model_file="$4"
+  local try_args=()
+  local tmp_json tmp_review tmp_model try_output try_exit
+
+  command -v claude &>/dev/null || return 127
+  [[ "$model" != "default" ]] && try_args=(--model "$model")
+
+  tmp_json="$(mktemp)"
+  tmp_review="$(mktemp)"
+  tmp_model="$(mktemp)"
+
+  try_output=$(printf '%s' "$diff" | claude -p "${try_args[@]}" --output-format json "$prompt" > "$tmp_json" 2>/dev/null)
+  try_exit=$?
+
+  if [[ $try_exit -eq 0 ]] && parse_claude_json_review "$tmp_json" "$tmp_review" "$tmp_model"; then
+    try_output="$(cat "$tmp_review" 2>/dev/null)"
+    if [[ -s "$tmp_model" ]]; then
+      cat "$tmp_model" > "$actual_model_file"
+    fi
+  else
+    [[ $try_exit -eq 0 ]] && try_exit=65
+    try_output=""
+  fi
+
+  printf '%s' "$try_output"
+  rm -f "$tmp_json" "$tmp_review" "$tmp_model"
+  return "$try_exit"
+}
+
+run_codex_review() {
+  local model="$1"
+  local prompt="$2"
+  local diff="$3"
+  local repo_root="$4"
+  local actual_model_file="$5"
+  local try_args=()
+  local tmp_json tmp_review
+  local try_exit
+
+  command -v codex &>/dev/null || return 127
+  [[ "$model" != "default" ]] && try_args=(-m "$model")
+
+  if [[ "$model" == "default" ]]; then
+    read_codex_default_model > "$actual_model_file" || printf '%s' "$model" > "$actual_model_file"
+  else
+    printf '%s' "$model" > "$actual_model_file"
+  fi
+
+  tmp_json="$(mktemp)"
+  tmp_review="$(mktemp)"
+  printf '%s' "$diff" \
+    | codex exec -C "$repo_root" --json --sandbox read-only --skip-git-repo-check --ephemeral --color never "${try_args[@]}" "$prompt" > "$tmp_json" 2>/dev/null
+  try_exit=$?
+
+  if parse_codex_json_review "$tmp_json" "$tmp_review"; then
+    cat "$tmp_review" 2>/dev/null
+  elif [[ $try_exit -eq 0 ]]; then
+    try_exit=65
+  fi
+
+  rm -f "$tmp_json" "$tmp_review"
+  return "$try_exit"
+}
+
+run_gemini_review() {
+  local model="$1"
+  local prompt="$2"
+  local diff="$3"
+  local actual_model_file="$4"
+  local try_args=()
+  local tmp_json tmp_review tmp_model try_output try_exit
+
+  command -v gemini &>/dev/null || return 127
+  [[ "$model" != "default" ]] && try_args=(-m "$model")
+
+  tmp_json="$(mktemp)"
+  tmp_review="$(mktemp)"
+  tmp_model="$(mktemp)"
+
+  printf '%s' "$diff" | gemini "${try_args[@]}" -p "$prompt" --output-format json > "$tmp_json" 2>/dev/null
+  try_exit=$?
+
+  if [[ $try_exit -eq 0 ]] && parse_gemini_json_review "$tmp_json" "$tmp_review" "$tmp_model"; then
+    try_output="$(cat "$tmp_review" 2>/dev/null)"
+    if [[ -s "$tmp_model" ]]; then
+      cat "$tmp_model" > "$actual_model_file"
+    fi
+  else
+    [[ $try_exit -eq 0 ]] && try_exit=65
+    try_output=""
+  fi
+
+  printf '%s' "$try_output"
+  rm -f "$tmp_json" "$tmp_review" "$tmp_model"
+  return "$try_exit"
+}
+
+run_experimental_review() {
+  local reviewer="$1"
+  command -v "$(reviewer_command "$reviewer")" &>/dev/null || return 127
+  printf '%s reviewer support is experimental and is not enabled for unattended auto-merge yet.' "$(reviewer_display_name "$reviewer")"
+  return 2
+}
+
+run_review_attempt() {
+  local reviewer="$1"
+  local model="$2"
+  local prompt="$3"
+  local diff="$4"
+  local repo_root="$5"
+  local actual_model_file="$6"
+
+  case "$reviewer" in
+    claude) run_claude_review "$model" "$prompt" "$diff" "$actual_model_file" ;;
+    codex) run_codex_review "$model" "$prompt" "$diff" "$repo_root" "$actual_model_file" ;;
+    gemini) run_gemini_review "$model" "$prompt" "$diff" "$actual_model_file" ;;
+    opencode|cursor|ollama) run_experimental_review "$reviewer" ;;
+    *) return 64 ;;
+  esac
+}
+
 review_pr() {
   local pr_number="$1"
   local pr_url="$2"
+  local diff repo_root prompt_file prompt
+  local reviewers=()
+  local models=()
+  local attempts=()
+  local reviewer model review try_output try_exit verdict
+  local reviewer_name reviewer_link footer actual_model actual_model_file
 
-  # Check if claude CLI is available
-  if ! command -v claude &>/dev/null; then
-    gh pr edit "$pr_number" --body "> **Auto-review skipped**
-\`claude\` CLI not found on this machine. Please review this backup manually before merging." > /dev/null 2>&1
-    notify_error "claude CLI not available — PR #$pr_number left open" "$pr_url"
-    return 1
-  fi
-
-  # Get the diff
-  local diff
   diff=$(gh pr diff "$pr_number" 2>/dev/null)
   if [[ -z "$diff" ]]; then
-    gh pr edit "$pr_number" --body "**Auto-review failed**: could not retrieve PR diff." > /dev/null 2>&1
+    write_pr_body "$pr_number" "**Auto-review failed**: could not retrieve PR diff."
     notify_error "Failed to get PR diff — PR #$pr_number left open" "$pr_url"
     return 1
   fi
 
-  # Load review prompt
-  local repo_root
   repo_root=$(git rev-parse --show-toplevel 2>/dev/null || printf '%s\n' "$DOTFILES_REPO_DIR")
-  local prompt_file="$repo_root/.github/review-prompt.md"
+  prompt_file="$repo_root/.github/review-prompt.md"
   if [[ ! -f "$prompt_file" ]]; then
-    gh pr edit "$pr_number" --body "**Auto-review skipped**: review prompt file not found." > /dev/null 2>&1
+    write_pr_body "$pr_number" "**Auto-review skipped**: review prompt file not found."
     notify_error "review-prompt.md missing — PR #$pr_number left open" "$pr_url"
     return 1
   fi
 
-  local prompt
   prompt=$(cat "$prompt_file")
 
-  # Parse model from .github/review-prompt.md
-  local model
-  model=$(grep -E '^model:\s*' "$prompt_file" | head -1 | sed 's/^model:\s*//' | xargs)
+  while IFS= read -r reviewer; do
+    [[ -n "$reviewer" ]] && reviewers+=("$reviewer")
+  done < <(configured_reviewers)
 
-  # Model cascade: try each until one succeeds
-  # If a specific model is pinned, only try that one (no fallback)
-  local models_to_try=()
-  local model_used="default"
-
-  if [[ -n "$model" && "$model" != "default" ]]; then
-    models_to_try=("$model")
-  else
-    # Auto cascade: default → sonnet → haiku
-    models_to_try=("" "claude-sonnet-4-5-20250514" "claude-haiku-4-5-20251001")
+  if [[ "${#reviewers[@]}" -eq 0 ]]; then
+    reviewers=("claude")
   fi
 
-  local review=""
-  for try_model in "${models_to_try[@]}"; do
-    local try_args=()
-    local try_label="default"
-    if [[ -n "$try_model" ]]; then
-      try_args=(--model "$try_model")
-      try_label="$try_model"
-    fi
+  for reviewer in "${reviewers[@]}"; do
+    models=()
+    while IFS= read -r model; do
+      [[ -n "$model" ]] && models+=("$model")
+    done < <(models_for_reviewer "$reviewer" "$prompt_file")
+    [[ "${#models[@]}" -eq 0 ]] && models=("default")
 
-    local try_output
-    # Try plain text output first; fall back to stream-json parsing
-    # if result is empty (workaround for CLI bug where result field
-    # is blank despite the model returning text content).
-    try_output=$(printf '%s' "$diff" | claude -p "${try_args[@]}" "$prompt" 2>/dev/null)
-    local try_exit=$?
-
-    if [[ $try_exit -eq 0 && -z "$try_output" ]]; then
-      # Plain text was empty — retry with stream-json and extract text blocks
-      try_output=$(set -o pipefail; printf '%s' "$diff" \
-        | claude -p "${try_args[@]}" --verbose --output-format stream-json "$prompt" 2>/dev/null \
-        | python3 -c "
-import sys, json
-for raw in sys.stdin:
-    raw = raw.strip()
-    if not raw:
-        continue
-    try:
-        event = json.loads(raw)
-    except Exception:
-        continue
-    if event.get('type') != 'assistant':
-        continue
-    msg = event.get('message', {}) or {}
-    for c in msg.get('content', []) or []:
-        if c.get('type') == 'text':
-            text = (c.get('text') or '').strip()
-            if text:
-                print(text)
-" 2>/dev/null)
+    for model in "${models[@]}"; do
+      reviewer_name="$(reviewer_display_name "$reviewer")"
+      actual_model_file="$(mktemp)"
+      echo "  ↳ reviewing with $reviewer_name (model: $model)..." >&2
+      try_output="$(run_review_attempt "$reviewer" "$model" "$prompt" "$diff" "$repo_root" "$actual_model_file")"
       try_exit=$?
-    fi
 
-    # Accept only if exit code is 0 AND output is non-empty
-    if [[ $try_exit -eq 0 && -n "$try_output" ]]; then
-      review="$try_output"
-      model_used="$try_label"
-      break
-    fi
-    echo "  ↳ $try_label failed (exit=$try_exit), trying next model..." >&2
-  done
+      if [[ $try_exit -eq 0 && -n "$try_output" ]]; then
+        review="$try_output"
+        verdict="$(printf '%s\n' "$review" | first_review_line)"
+        reviewer_link="$(reviewer_url "$reviewer")"
+        actual_model="$(cat "$actual_model_file" 2>/dev/null)"
+        [[ -n "$actual_model" ]] || actual_model="$model"
+        if [[ "$actual_model" != "$model" ]]; then
+          footer="> Reviewed by **$reviewer_name** (model: \`$actual_model\`, configured: \`$model\`)"
+        else
+          footer="> Reviewed by **$reviewer_name** (model: \`$model\`)"
+        fi
+        [[ -n "$reviewer_link" ]] && footer="$footer via [$reviewer_name]($reviewer_link)"
+        rm -f "$actual_model_file"
 
-  if [[ -z "$review" ]]; then
-    gh pr edit "$pr_number" --body "**Auto-review failed**: \`claude\` returned an empty response. Please review manually." > /dev/null 2>&1
-    notify_error "Claude review empty — PR #$pr_number left open" "$pr_url"
-    return 1
-  fi
-
-  # Append review metadata footer
-  local review_with_footer="$review
+        write_pr_body "$pr_number" "$review
 
 ---
-> Reviewed by **Claude** (model: \`$model_used\`) via [Claude Code](https://claude.com/claude-code)"
+$footer"
 
-  # Update PR body with the review (use temp file to handle special characters)
-  local tmp_review
-  tmp_review=$(mktemp)
-  echo "$review_with_footer" > "$tmp_review"
-  gh pr edit "$pr_number" --body-file "$tmp_review" > /dev/null 2>&1
-  rm -f "$tmp_review"
+        if [[ "$verdict" == APPROVED* ]]; then
+          return 0
+        fi
 
-  # Check verdict (first non-empty line)
-  if echo "$review" | sed '/^[[:space:]]*$/d' | head -1 | grep -q "^APPROVED"; then
-    return 0
-  else
-    notify_error "PR #$pr_number flagged by review — needs manual check" "$pr_url"
-    return 1
-  fi
+        notify_error "PR #$pr_number flagged by $reviewer_name review — needs manual check" "$pr_url"
+        return 1
+      fi
+
+      if [[ $try_exit -eq 127 ]]; then
+        attempts+=("$reviewer_name ($model): CLI not found")
+      elif [[ -z "$try_output" ]]; then
+        attempts+=("$reviewer_name ($model): empty response, exit=$try_exit")
+      else
+        attempts+=("$reviewer_name ($model): $(printf '%s\n' "$try_output" | first_review_line), exit=$try_exit")
+      fi
+      rm -f "$actual_model_file"
+      echo "  ↳ $reviewer_name ($model) failed (exit=$try_exit), trying next reviewer/model..." >&2
+    done
+  done
+
+  local failure_body="**Auto-review failed**: all configured reviewers failed or returned no usable review.
+
+Attempted reviewers:"
+  for try_output in "${attempts[@]}"; do
+    failure_body="$failure_body
+- $try_output"
+  done
+  failure_body="$failure_body
+
+Please review this backup manually before merging."
+
+  write_pr_body "$pr_number" "$failure_body"
+  notify_error "AI review failed — PR #$pr_number left open" "$pr_url"
+  return 1
 }
 
 # ── Test mode (--test) ───────────────────────────────────────────

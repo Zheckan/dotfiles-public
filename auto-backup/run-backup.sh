@@ -50,7 +50,7 @@ if [[ -t 0 && -t 1 ]]; then
 else
   # Non-interactive (Apple Shortcuts, LaunchAgent) — background ALL work
   # (including git fetch) so Shortcuts returns immediately.
-  # Avoid nohup — it interferes with claude -p stdout capture.
+  # Avoid nohup — it interferes with reviewer stdout capture.
   (
     git fetch origin || echo "WARN: git fetch origin failed" >&2
     git checkout origin/main -- auto-backup/ || echo "WARN: git checkout origin/main -- auto-backup/ failed" >&2

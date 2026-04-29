@@ -37,7 +37,8 @@ Optional tools used by specific modules:
 - `terminal-notifier` for clickable macOS notifications
 - `jq`, `python3`, and `rsync` for config processing/syncing
 - `mas` for Mac App Store app management through Homebrew Bundle
-- `claude` plus an active Claude subscription/login for local PR review in the private auto-backup flow
+- `claude` plus an active Claude subscription/login for the default local PR review in the private auto-backup flow
+- `codex` or `gemini` for opt-in local PR review backends
 - `code`, `cursor`, and app-specific CLIs for editor backups
 - `npm`, `pnpm`, `pip`, and related language tools for package backups
 
@@ -52,16 +53,22 @@ Optional tools used by specific modules:
 
 Auto-backup flags:
 
-- no flag: rebase, run backup, commit, and push to a device branch
-- `--main-pc`: backup, create/reuse PR, run Claude review, and squash-merge if approved
+- no flag: use `auto-backup/config.env`
+- `--main-pc`: backup, create/reuse PR, run AI review, and squash-merge if approved
 - `--pr-only`: backup, create/reuse PR, and run review without merging
 - `--test`: push/review the current branch without backup or merge
 - `--no-rebase`: skip rebasing on `main`
-- `--no-review`: skip Claude review
+- `--no-review`: skip AI review
 
-The Claude review/auto-merge path requires `gh` auth, `claude` CLI auth, and a Claude
-setup that can run `claude -p`. If that is not available, the PR stays open for manual
-review.
+The review/auto-merge path runs `gh pr diff`, pipes that diff into the configured
+reviewer CLIs in order, then writes the review into the PR description. Those CLIs
+must already be installed and authenticated because the script runs unattended from
+Shortcuts or LaunchAgent and cannot complete login prompts. By default the config tries
+Claude first, then Codex and Gemini as fallbacks; if you choose a different provider,
+authenticate that provider before enabling PR review. Claude, Codex, and Gemini are
+tested adapters; OpenCode, Cursor, and Ollama are experimental selectors that fail
+closed. If no configured reviewer can produce a usable review, the PR stays open for
+manual review.
 
 ## Auto-Backup Setup
 
@@ -73,7 +80,8 @@ Manual run:
 ./auto-backup/run-backup.sh
 ```
 
-Primary-machine run with PR review and merge:
+Primary-machine run with PR review and merge is configured through
+`auto-backup/config.env`. For one-off overrides:
 
 ```bash
 ./auto-backup/run-backup.sh --main-pc
@@ -98,6 +106,12 @@ Use Apple Shortcuts if you want a visible macOS automation instead:
 ./auto-backup/install-shortcut.sh
 ```
 
+To generate or change `auto-backup/config.env` interactively:
+
+```bash
+./auto-backup/configure.sh
+```
+
 For non-interactive runners like LaunchAgent or Shortcuts, set at least
 `DOTFILES_REPO_DIR` explicitly if the repo is not in the expected location:
 
@@ -105,16 +119,19 @@ For non-interactive runners like LaunchAgent or Shortcuts, set at least
 export DOTFILES_REPO_DIR="$HOME/Developer/dotfiles"
 ```
 
-For `--main-pc`, authenticate first:
+For PR review/merge modes, authenticate first:
 
 ```bash
 gh auth login
-claude
+claude        # if using Claude
+codex login   # if using Codex
+gemini        # if using Gemini
 ```
 
 The script creates a device branch like `device/{model}-{serial-suffix}/{username}`,
-pushes the backup commit there, creates or reuses a PR to `main`, asks Claude to
-review the diff, and squash-merges only when the review starts with `APPROVED`.
+pushes the backup commit there, creates or reuses a PR to `main`, asks the configured
+reviewer chain to review the diff, and squash-merges only when the review starts with
+`APPROVED`.
 
 Modules are organized by area:
 
@@ -151,6 +168,11 @@ defaults to the `origin` remote slug when it can be parsed.
 
 LaunchAgent and Apple Shortcuts run in a non-interactive environment. If you use
 them, set required environment variables inside the launcher or load them explicitly.
+
+Auto-backup behavior is configured in `auto-backup/config.env`. The public mirror
+ships safe `device-only` defaults; run `auto-backup/configure.sh` to opt into PR
+review/merge behavior. Machine-local overrides belong in ignored
+`auto-backup/config.local.env`.
 
 ## Safety Notes
 
