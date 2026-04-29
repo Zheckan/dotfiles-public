@@ -2,8 +2,40 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CONFIG_FILE="$SCRIPT_DIR/config.env"
+CONFIG_FILE="$SCRIPT_DIR/config.local.env"
+CONFIG_SCOPE="local"
 DEFAULT_REPO_DIR="$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel 2>/dev/null || (cd "$SCRIPT_DIR/.." && pwd))"
+
+usage() {
+  cat <<'USAGE'
+Usage: auto-backup/configure.sh [--tracked]
+
+Without flags, writes ignored machine-local overrides to auto-backup/config.local.env.
+Use --tracked only when changing repo-wide defaults in auto-backup/config.env.
+USAGE
+}
+
+parse_args() {
+  local arg
+
+  for arg in "$@"; do
+    case "$arg" in
+      --tracked)
+        CONFIG_FILE="$SCRIPT_DIR/config.env"
+        CONFIG_SCOPE="tracked"
+        ;;
+      -h|--help)
+        usage
+        exit 0
+        ;;
+      *)
+        printf 'configure.sh: unknown option: %s\n' "$arg" >&2
+        usage >&2
+        exit 2
+        ;;
+    esac
+  done
+}
 
 require_tty() {
   if [[ ! -t 0 || ! -t 1 ]]; then
@@ -267,9 +299,9 @@ write_config() {
   backup_file="${TMPDIR:-/tmp}/dotfiles-config.env.backup.$(date +%Y%m%d-%H%M%S)"
 
   cat > "$tmp_file" <<CONFIG
-# Auto-backup defaults.
+# Auto-backup $CONFIG_SCOPE config.
 # Shortcuts and LaunchAgent should call run-backup.sh without mode flags.
-# Override one run with CLI flags, or override one machine with config.local.env.
+# Override one run with CLI flags.
 
 DOTFILES_AUTOBACKUP_MODE="$mode"
 DOTFILES_AUTOBACKUP_REBASE="$rebase"
@@ -305,11 +337,13 @@ main() {
   local claude_preset codex_preset gemini_preset
   local claude_models codex_models gemini_models repo_dir
 
+  parse_args "$@"
   require_tty
   trap show_cursor EXIT
   hide_cursor
 
   printf 'Auto-backup config setup\n\n'
+  printf 'Writing %s\n\n' "$CONFIG_FILE"
 
   mode_label="$(select_one "Auto-backup mode" "main-pc" "device-only" "pr-only" "test")"
   mode="$mode_label"

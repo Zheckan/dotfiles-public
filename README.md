@@ -106,7 +106,7 @@ Use Apple Shortcuts if you want a visible macOS automation instead:
 ./auto-backup/install-shortcut.sh
 ```
 
-To generate or change `auto-backup/config.env` interactively:
+To generate or change local auto-backup overrides interactively:
 
 ```bash
 ./auto-backup/configure.sh
@@ -170,8 +170,8 @@ LaunchAgent and Apple Shortcuts run in a non-interactive environment. If you use
 them, set required environment variables inside the launcher or load them explicitly.
 
 Auto-backup behavior is configured in `auto-backup/config.env`. The public mirror
-ships safe `device-only` defaults; run `auto-backup/configure.sh` to opt into PR
-review/merge behavior. Machine-local overrides belong in ignored
+ships safe `device-only` defaults; run `auto-backup/configure.sh` to write ignored
+machine-local overrides and opt into PR review/merge behavior. Machine-local overrides belong in ignored
 `auto-backup/config.local.env`.
 
 ## Safety Notes
