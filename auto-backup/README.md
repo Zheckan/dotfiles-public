@@ -92,8 +92,10 @@ To generate a config interactively:
 The setup script uses arrow-key menus. For reviewers, Space selects one or more
 providers, then the script asks for the default reviewer first and fallback reviewers
 after that. Claude, Codex, and Gemini are tested adapters; OpenCode, Cursor, and
-Ollama are experimental selectors that fail closed. The script writes
-`auto-backup/config.env` and prints the Shortcuts shell snippet to use.
+Ollama are experimental selectors that fail closed. By default the script writes
+ignored machine-local overrides to `auto-backup/config.local.env` and prints the
+Shortcuts shell snippet to use. Use `./auto-backup/configure.sh --tracked` only when
+you intentionally want to change repo-wide defaults in `auto-backup/config.env`.
 
 ## Flags
 
@@ -183,7 +185,7 @@ Reviewer order can be set in either flags or environment:
 # Flags win and preserve order
 "$DOTFILES_REPO_DIR/auto-backup/run-backup.sh" --main-pc --codex --claude
 
-# Or configure defaults in auto-backup/config.env
+# Or configure local defaults in auto-backup/config.local.env
 DOTFILES_REVIEWERS="codex,claude"
 DOTFILES_REVIEW_CODEX_MODELS="default,gpt-5.4,gpt-5.4-mini"
 DOTFILES_REVIEW_CLAUDE_MODELS="default,sonnet,haiku"
@@ -259,7 +261,7 @@ shortcuts run "Dotfiles Backup"
 | Flexible schedule | Fixed interval only | Any time/day/condition |
 | Discoverable | Hidden in ~/Library | Visible in Shortcuts.app |
 | Runs without login | Can be configured | No |
-| Supports `main-pc` mode | Configure plist/env | Yes (through `config.env`) |
+| Supports `main-pc` mode | Configure plist/env | Yes (through `config.env` or `config.local.env`) |
 
 ## Files
 
@@ -268,7 +270,8 @@ shortcuts run "Dotfiles Backup"
 | `run-backup.sh` | **Entry point** — syncs repo with main, then exec's `auto-commit.sh`. Use this instead of calling `auto-commit.sh` directly |
 | `auto-commit.sh` | Core logic: backup, commit, review, PR, merge. Called by `run-backup.sh` |
 | `config.env` | Tracked defaults for mode, reviewer order, and model fallback |
-| `configure.sh` | Interactive config setup that writes `config.env` and prints automation instructions |
+| `config.local.env` | Ignored machine-local overrides written by `configure.sh` |
+| `configure.sh` | Interactive config setup that writes `config.local.env` by default and prints automation instructions |
 | `.github/review-prompt.md` | Review prompt shared by AI review backends (editable) |
 | `install.sh` | Generate and load the LaunchAgent plist (Option A) |
 | `uninstall.sh` | Remove the LaunchAgent (Option A) |
