@@ -9,5 +9,6 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 "$SCRIPT_DIR/codex/backup.sh"
 "$SCRIPT_DIR/gemini/backup.sh"
 "$SCRIPT_DIR/opencode/backup.sh"
+"$SCRIPT_DIR/t3code/backup.sh"
 
 log_info "All AI tool configs backed up."
