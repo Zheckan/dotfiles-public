@@ -13,6 +13,8 @@ copy_to_repo "$CODEX_CONFIG_DIR/instructions.md"          "$SCRIPT_DIR/instructi
 copy_to_repo "$CODEX_CONFIG_DIR/AGENTS.md"                "$SCRIPT_DIR/AGENTS.md"
 # ── User-content directories (full sync) ─────────────────────────────
 sync_dir_to_repo "$CODEX_CONFIG_DIR/rules" "$SCRIPT_DIR/rules"
+sync_dir_to_repo "$CODEX_CONFIG_DIR/agents" "$SCRIPT_DIR/agents"
+sync_dir_to_repo "$CODEX_CONFIG_DIR/pets" "$SCRIPT_DIR/pets"
 
 # Skills: sync only user-created skills (exclude .system/)
 if [[ -d "$CODEX_CONFIG_DIR/skills" ]]; then

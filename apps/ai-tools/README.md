@@ -29,7 +29,7 @@ Or individually:
 | Tool | Config Location | Notes |
 |---|---|---|
 | **Claude Code** | `~/.claude/` | Settings, keybindings, statusline script. Installed via `brew install --cask claude-code`. |
-| **Codex** | `~/.codex/` | `config.json`. Install with `npm install -g @openai/codex`. |
+| **Codex** | `~/.codex/` | Config, rules, custom agents, user skills, and custom pets. Install with `npm install -g @openai/codex`. |
 | **Gemini CLI** | `~/.gemini/` | Settings, `GEMINI.md`, commands, policies, and skills. Auth, project trust files, and runtime state are excluded. |
 | **OpenCode** | `~/.config/opencode/` | `opencode.json` plus `instructions/` directory. |
 | **T3 Code** | `~/.t3/userdata/` | Client settings, app settings, and keybindings. Runtime state is excluded. |
