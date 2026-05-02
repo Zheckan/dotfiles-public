@@ -25,6 +25,8 @@ copy_to_system "$SCRIPT_DIR/instructions.md"          "$CODEX_CONFIG_DIR/instruc
 copy_to_system "$SCRIPT_DIR/AGENTS.md"                "$CODEX_CONFIG_DIR/AGENTS.md"
 # ── User-content directories ─────────────────────────────────────────
 sync_dir_to_system "$SCRIPT_DIR/rules" "$CODEX_CONFIG_DIR/rules"
+sync_dir_to_system "$SCRIPT_DIR/agents" "$CODEX_CONFIG_DIR/agents"
+sync_dir_to_system "$SCRIPT_DIR/pets" "$CODEX_CONFIG_DIR/pets"
 
 if [[ -d "$SCRIPT_DIR/skills" ]]; then
   ensure_dir "$CODEX_CONFIG_DIR/skills"
