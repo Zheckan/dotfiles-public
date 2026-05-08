@@ -309,8 +309,8 @@ DOTFILES_AUTOBACKUP_REVIEW="$review"
 
 # Reviewers are tried in order. Claude, Codex, and Gemini are tested adapters.
 # OpenCode, Cursor, and Ollama are experimental selectors that fail closed.
-# Fallback continues after missing CLIs, failed commands, or empty output.
-# Any successful non-empty review whose first non-blank line is not APPROVED stops fallback.
+# Fallback continues after missing CLIs, failed commands, empty output, or invalid verdict output.
+# A single misplaced verdict is repaired; fallback/repair details are kept in one PR comment.
 DOTFILES_REVIEWERS="$reviewers"
 
 # Model names are passed through to each CLI as best-effort strings.

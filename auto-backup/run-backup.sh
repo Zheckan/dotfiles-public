@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Launcher for auto-commit.sh — ensures the latest version always runs.
 #
-# Fetches latest from origin, updates auto-backup/ scripts from main,
-# then exec's auto-commit.sh so the newest code is always in memory.
+# Fetches latest from origin, updates auto-backup/ scripts from main when safe,
+# then exec's auto-commit.sh so the newest code is usually in memory.
 # auto-commit.sh handles its own rebase on the device branch.
 #
 # Usage: same flags as auto-commit.sh
@@ -42,18 +42,37 @@ mkdir -p "$LOG_DIR" 2>/dev/null || true
 LOG_FILE="$LOG_DIR/dotfiles-autocommit.log"
 SCRIPT="$DOTFILES_REPO_DIR/auto-backup/auto-commit.sh"
 
+worktree_has_local_changes() {
+  ! git diff --quiet ||
+    ! git diff --cached --quiet ||
+    [[ -n "$(git ls-files --others --exclude-standard)" ]]
+}
+
+refresh_auto_backup_scripts() {
+  if ! git fetch origin > /dev/null 2>&1; then
+    echo "WARN: git fetch origin failed" >&2
+  fi
+
+  if worktree_has_local_changes; then
+    echo "run-backup: local changes detected; skipping script refresh before auto-commit can stash them" >&2
+    return 0
+  fi
+
+  if ! git checkout origin/main -- auto-backup/ > /dev/null 2>&1; then
+    echo "WARN: git checkout origin/main -- auto-backup/ failed; continuing with local scripts" >&2
+  fi
+}
+
 if [[ -t 0 && -t 1 ]]; then
   # Interactive terminal — run everything in foreground
-  git fetch origin > /dev/null 2>&1
-  git checkout origin/main -- auto-backup/ 2>/dev/null || true
+  refresh_auto_backup_scripts
   exec "$SCRIPT" "$@"
 else
   # Non-interactive (Apple Shortcuts, LaunchAgent) — background ALL work
   # (including git fetch) so Shortcuts returns immediately.
   # Avoid nohup — it interferes with reviewer stdout capture.
   (
-    git fetch origin || echo "WARN: git fetch origin failed" >&2
-    git checkout origin/main -- auto-backup/ || echo "WARN: git checkout origin/main -- auto-backup/ failed" >&2
+    refresh_auto_backup_scripts
     "$SCRIPT" "$@"
   ) </dev/null >>"$LOG_FILE" 2>&1 &
   disown 2>/dev/null || true

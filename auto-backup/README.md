@@ -178,6 +178,10 @@ in `auto-backup/config.env`.
 - Stable aliases like `sonnet` and `haiku` are preferred for unattended automation.
 - Exact model IDs can be configured when you want pinning; if they disappear, the
   script tries the next configured model/reviewer and leaves the PR open if all fail.
+- If a reviewer adds a harmless preface before a single `APPROVED` or
+  `CHANGES_REQUESTED` line, the script repairs the PR body so the verdict is first.
+- Fallback attempts and output repairs are recorded in one sticky PR diagnostics
+  comment, which is updated on reruns and removed when no longer needed.
 
 Reviewer order can be set in either flags or environment:
 
@@ -214,7 +218,8 @@ PR created → gh pr diff → configured reviewer/model attempts
                                       ↓
                             APPROVED? → squash-merge
                             CHANGES_REQUESTED? → leave PR open + notify
-                            error/empty? → try next model/reviewer
+                            error/empty/invalid? → try next model/reviewer
+                            single misplaced verdict? → repair body + record diagnostic
                             all failed? → leave PR open + notify
 ```
 
@@ -280,5 +285,7 @@ shortcuts run "Dotfiles Backup"
 ### Why `run-backup.sh`?
 
 `auto-commit.sh` updates itself via rebase, but bash already has the old version in memory.
-`run-backup.sh` syncs the repo first, then `exec`s `auto-commit.sh` — so the latest code always runs.
+`run-backup.sh` syncs scripts only when the worktree is clean, then `exec`s
+`auto-commit.sh`. If local tracked, staged, or untracked work exists, it skips the
+script refresh so `auto-commit.sh` can stash that work before switching branches.
 The launcher is tiny and rarely changes, so this problem doesn't apply to it.
