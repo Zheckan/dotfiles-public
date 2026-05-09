@@ -405,6 +405,80 @@ first_review_line() {
   sed '/^[[:space:]]*$/d' | head -1
 }
 
+lines_from_array() {
+  local item
+
+  for item in "$@"; do
+    printf '%s\n' "$item"
+  done
+}
+
+sanitize_review_detail() {
+  if [[ "$#" -gt 0 ]]; then
+    printf '%s' "$*"
+  else
+    cat
+  fi | python3 -c '
+import re
+import sys
+
+text = sys.stdin.read()
+text = re.sub(r"\s+", " ", text).strip()
+patterns = [
+    r"(?i)\bauthorization\b\s*[:=]\s*bearer\s+[^\s,;]+",
+    r"(?i)\bauthorization\b\s*[:=]\s*[^\s,;]+",
+    r"(?i)\bbearer\s+[^\s,;]+",
+    r"(?i)\b(api[_-]?(?:key|token)|token|password|passwd|secret)\b\s*[:=]\s*[^\s,;]+",
+]
+for pattern in patterns:
+    text = re.sub(pattern, lambda match: re.split(r"[:=\s]+", match.group(0), maxsplit=1)[0] + "=<redacted>", text)
+if len(text) > 240:
+    text = text[:237].rstrip() + "..."
+print(text)
+'
+}
+
+normalize_review_output() {
+  local input_file="$1"
+  local output_file="$2"
+  local meta_file="$3"
+
+  python3 - "$input_file" "$output_file" "$meta_file" <<'PY'
+import sys
+
+input_file, output_file, meta_file = sys.argv[1:4]
+with open(input_file, "r", encoding="utf-8") as fh:
+    lines = fh.read().splitlines()
+
+verdict_indexes = [
+    index
+    for index, line in enumerate(lines)
+    if line.strip() in {"APPROVED", "CHANGES_REQUESTED"}
+]
+
+if len(verdict_indexes) != 1:
+    reason = "missing verdict" if not verdict_indexes else "multiple verdict lines"
+    with open(meta_file, "w", encoding="utf-8") as fh:
+        fh.write(reason)
+    sys.exit(1)
+
+verdict_index = verdict_indexes[0]
+verdict = lines[verdict_index].strip()
+preface_lines = sum(1 for line in lines[:verdict_index] if line.strip())
+normalized = [verdict] + lines[verdict_index + 1 :]
+
+with open(output_file, "w", encoding="utf-8") as fh:
+    fh.write("\n".join(normalized))
+
+with open(meta_file, "w", encoding="utf-8") as fh:
+    if preface_lines:
+        fh.write(f"removed {preface_lines} preface line")
+        if preface_lines != 1:
+            fh.write("s")
+        fh.write(f" before {verdict}")
+PY
+}
+
 write_pr_body() {
   local pr_number="$1"
   local body="$2"
@@ -414,6 +488,111 @@ write_pr_body() {
   printf '%s\n' "$body" > "$tmp_body"
   gh pr edit "$pr_number" --body-file "$tmp_body" > /dev/null 2>&1
   rm -f "$tmp_body"
+}
+
+review_diagnostics_marker() {
+  printf '<!-- dotfiles-auto-review-diagnostics -->'
+}
+
+find_review_diagnostics_comment() {
+  local pr_number="$1"
+  local marker
+
+  [[ -n "$DOTFILES_GITHUB_REPO" ]] || return 0
+  marker="$(review_diagnostics_marker)"
+  gh api "repos/$DOTFILES_GITHUB_REPO/issues/$pr_number/comments" --paginate \
+    --jq ".[] | select(.body | contains(\"$marker\")) | .id" 2>/dev/null | head -1
+}
+
+json_body_file() {
+  local body_file="$1"
+  local json_file="$2"
+
+  python3 - "$body_file" "$json_file" <<'PY'
+import json
+import sys
+
+body_file, json_file = sys.argv[1:3]
+with open(body_file, "r", encoding="utf-8") as fh:
+    body = fh.read()
+with open(json_file, "w", encoding="utf-8") as fh:
+    json.dump({"body": body}, fh)
+PY
+}
+
+upsert_review_diagnostics_comment() {
+  local pr_number="$1"
+  local body="$2"
+  local comment_id tmp_body tmp_json
+
+  [[ -n "$DOTFILES_GITHUB_REPO" ]] || return 0
+
+  tmp_body="$(mktemp)"
+  tmp_json="$(mktemp)"
+  printf '%s\n' "$body" > "$tmp_body"
+  json_body_file "$tmp_body" "$tmp_json"
+
+  comment_id="$(find_review_diagnostics_comment "$pr_number")"
+  if [[ -n "$comment_id" ]]; then
+    gh api --method PATCH "repos/$DOTFILES_GITHUB_REPO/issues/comments/$comment_id" --input "$tmp_json" > /dev/null 2>&1 \
+      || printf 'WARN: failed to update auto-review diagnostics comment\n' >&2
+  else
+    gh api --method POST "repos/$DOTFILES_GITHUB_REPO/issues/$pr_number/comments" --input "$tmp_json" > /dev/null 2>&1 \
+      || printf 'WARN: failed to create auto-review diagnostics comment\n' >&2
+  fi
+
+  rm -f "$tmp_body" "$tmp_json"
+}
+
+delete_review_diagnostics_comment() {
+  local pr_number="$1"
+  local comment_id
+
+  [[ -n "$DOTFILES_GITHUB_REPO" ]] || return 0
+  comment_id="$(find_review_diagnostics_comment "$pr_number")"
+  [[ -n "$comment_id" ]] || return 0
+
+  gh api --method DELETE "repos/$DOTFILES_GITHUB_REPO/issues/comments/$comment_id" > /dev/null 2>&1 \
+    || printf 'WARN: failed to delete stale auto-review diagnostics comment\n' >&2
+}
+
+build_review_diagnostics_body() {
+  local final_reviewer="$1"
+  local final_model="$2"
+  local final_actual_model="$3"
+  local diagnostics_text="$4"
+  local normalizations_text="$5"
+  local body marker item
+
+  marker="$(review_diagnostics_marker)"
+  body="$marker
+### Auto-review fallback diagnostics
+
+Final reviewer: $final_reviewer (model: \`$final_actual_model\`, configured: \`$final_model\`)"
+
+  if [[ -n "$diagnostics_text" ]]; then
+    body="$body
+
+Attempts before final reviewer:"
+    while IFS= read -r item || [[ -n "$item" ]]; do
+      [[ -n "$item" ]] || continue
+      body="$body
+- $item"
+    done <<< "$diagnostics_text"
+  fi
+
+  if [[ -n "$normalizations_text" ]]; then
+    body="$body
+
+Output normalization:"
+    while IFS= read -r item || [[ -n "$item" ]]; do
+      [[ -n "$item" ]] || continue
+      body="$body
+- $item"
+    done <<< "$normalizations_text"
+  fi
+
+  printf '%s' "$body"
 }
 
 parse_claude_json_review() {
@@ -525,8 +704,9 @@ run_claude_review() {
   local prompt="$2"
   local diff="$3"
   local actual_model_file="$4"
+  local detail_file="$5"
   local try_args=()
-  local tmp_json tmp_review tmp_model try_output try_exit
+  local tmp_json tmp_review tmp_model tmp_error try_output try_exit
 
   command -v claude &>/dev/null || return 127
   [[ "$model" != "default" ]] && try_args=(--model "$model")
@@ -534,8 +714,9 @@ run_claude_review() {
   tmp_json="$(mktemp)"
   tmp_review="$(mktemp)"
   tmp_model="$(mktemp)"
+  tmp_error="$(mktemp)"
 
-  try_output=$(printf '%s' "$diff" | claude -p "${try_args[@]}" --output-format json "$prompt" > "$tmp_json" 2>/dev/null)
+  try_output=$(printf '%s' "$diff" | claude -p "${try_args[@]}" --output-format json "$prompt" > "$tmp_json" 2>"$tmp_error")
   try_exit=$?
 
   if [[ $try_exit -eq 0 ]] && parse_claude_json_review "$tmp_json" "$tmp_review" "$tmp_model"; then
@@ -544,12 +725,13 @@ run_claude_review() {
       cat "$tmp_model" > "$actual_model_file"
     fi
   else
+    { cat "$tmp_error" 2>/dev/null; cat "$tmp_json" 2>/dev/null; } > "$detail_file"
     [[ $try_exit -eq 0 ]] && try_exit=65
     try_output=""
   fi
 
   printf '%s' "$try_output"
-  rm -f "$tmp_json" "$tmp_review" "$tmp_model"
+  rm -f "$tmp_json" "$tmp_review" "$tmp_model" "$tmp_error"
   return "$try_exit"
 }
 
@@ -559,8 +741,9 @@ run_codex_review() {
   local diff="$3"
   local repo_root="$4"
   local actual_model_file="$5"
+  local detail_file="$6"
   local try_args=()
-  local tmp_json tmp_review
+  local tmp_json tmp_review tmp_error
   local try_exit
 
   command -v codex &>/dev/null || return 127
@@ -574,17 +757,21 @@ run_codex_review() {
 
   tmp_json="$(mktemp)"
   tmp_review="$(mktemp)"
+  tmp_error="$(mktemp)"
   printf '%s' "$diff" \
-    | codex exec -C "$repo_root" --json --sandbox read-only --skip-git-repo-check --ephemeral --color never "${try_args[@]}" "$prompt" > "$tmp_json" 2>/dev/null
+    | codex exec -C "$repo_root" --json --sandbox read-only --skip-git-repo-check --ephemeral --color never "${try_args[@]}" "$prompt" > "$tmp_json" 2>"$tmp_error"
   try_exit=$?
 
-  if parse_codex_json_review "$tmp_json" "$tmp_review"; then
+  if [[ $try_exit -eq 0 ]] && parse_codex_json_review "$tmp_json" "$tmp_review"; then
     cat "$tmp_review" 2>/dev/null
   elif [[ $try_exit -eq 0 ]]; then
+    { cat "$tmp_error" 2>/dev/null; cat "$tmp_json" 2>/dev/null; } > "$detail_file"
     try_exit=65
+  else
+    { cat "$tmp_error" 2>/dev/null; cat "$tmp_json" 2>/dev/null; } > "$detail_file"
   fi
 
-  rm -f "$tmp_json" "$tmp_review"
+  rm -f "$tmp_json" "$tmp_review" "$tmp_error"
   return "$try_exit"
 }
 
@@ -593,8 +780,9 @@ run_gemini_review() {
   local prompt="$2"
   local diff="$3"
   local actual_model_file="$4"
+  local detail_file="$5"
   local try_args=()
-  local tmp_json tmp_review tmp_model try_output try_exit
+  local tmp_json tmp_review tmp_model tmp_error try_output try_exit
 
   command -v gemini &>/dev/null || return 127
   [[ "$model" != "default" ]] && try_args=(-m "$model")
@@ -602,8 +790,9 @@ run_gemini_review() {
   tmp_json="$(mktemp)"
   tmp_review="$(mktemp)"
   tmp_model="$(mktemp)"
+  tmp_error="$(mktemp)"
 
-  printf '%s' "$diff" | gemini "${try_args[@]}" -p "$prompt" --output-format json > "$tmp_json" 2>/dev/null
+  printf '%s' "$diff" | gemini "${try_args[@]}" -p "$prompt" --output-format json > "$tmp_json" 2>"$tmp_error"
   try_exit=$?
 
   if [[ $try_exit -eq 0 ]] && parse_gemini_json_review "$tmp_json" "$tmp_review" "$tmp_model"; then
@@ -612,19 +801,21 @@ run_gemini_review() {
       cat "$tmp_model" > "$actual_model_file"
     fi
   else
+    { cat "$tmp_error" 2>/dev/null; cat "$tmp_json" 2>/dev/null; } > "$detail_file"
     [[ $try_exit -eq 0 ]] && try_exit=65
     try_output=""
   fi
 
   printf '%s' "$try_output"
-  rm -f "$tmp_json" "$tmp_review" "$tmp_model"
+  rm -f "$tmp_json" "$tmp_review" "$tmp_model" "$tmp_error"
   return "$try_exit"
 }
 
 run_experimental_review() {
   local reviewer="$1"
+  local detail_file="$2"
   command -v "$(reviewer_command "$reviewer")" &>/dev/null || return 127
-  printf '%s reviewer support is experimental and is not enabled for unattended auto-merge yet.' "$(reviewer_display_name "$reviewer")"
+  printf '%s reviewer support is experimental and is not enabled for unattended auto-merge yet.' "$(reviewer_display_name "$reviewer")" > "$detail_file"
   return 2
 }
 
@@ -635,12 +826,13 @@ run_review_attempt() {
   local diff="$4"
   local repo_root="$5"
   local actual_model_file="$6"
+  local detail_file="$7"
 
   case "$reviewer" in
-    claude) run_claude_review "$model" "$prompt" "$diff" "$actual_model_file" ;;
-    codex) run_codex_review "$model" "$prompt" "$diff" "$repo_root" "$actual_model_file" ;;
-    gemini) run_gemini_review "$model" "$prompt" "$diff" "$actual_model_file" ;;
-    opencode|cursor|ollama) run_experimental_review "$reviewer" ;;
+    claude) run_claude_review "$model" "$prompt" "$diff" "$actual_model_file" "$detail_file" ;;
+    codex) run_codex_review "$model" "$prompt" "$diff" "$repo_root" "$actual_model_file" "$detail_file" ;;
+    gemini) run_gemini_review "$model" "$prompt" "$diff" "$actual_model_file" "$detail_file" ;;
+    opencode|cursor|ollama) run_experimental_review "$reviewer" "$detail_file" ;;
     *) return 64 ;;
   esac
 }
@@ -652,8 +844,12 @@ review_pr() {
   local reviewers=()
   local models=()
   local attempts=()
+  local diagnostics=()
+  local normalizations=()
   local reviewer model review try_output try_exit verdict
-  local reviewer_name reviewer_link footer actual_model actual_model_file
+  local reviewer_name reviewer_link footer actual_model actual_model_file detail_file
+  local raw_detail detail normalized_review_file normalization_file normalization_detail
+  local diagnostics_body
 
   diff=$(gh pr diff "$pr_number" 2>/dev/null)
   if [[ -z "$diff" ]]; then
@@ -690,12 +886,33 @@ review_pr() {
     for model in "${models[@]}"; do
       reviewer_name="$(reviewer_display_name "$reviewer")"
       actual_model_file="$(mktemp)"
+      detail_file="$(mktemp)"
       echo "  ↳ reviewing with $reviewer_name (model: $model)..." >&2
-      try_output="$(run_review_attempt "$reviewer" "$model" "$prompt" "$diff" "$repo_root" "$actual_model_file")"
+      try_output="$(run_review_attempt "$reviewer" "$model" "$prompt" "$diff" "$repo_root" "$actual_model_file" "$detail_file")"
       try_exit=$?
 
       if [[ $try_exit -eq 0 && -n "$try_output" ]]; then
-        review="$try_output"
+        normalized_review_file="$(mktemp)"
+        normalization_file="$(mktemp)"
+        printf '%s' "$try_output" > "$normalized_review_file.raw"
+
+        if ! normalize_review_output "$normalized_review_file.raw" "$normalized_review_file" "$normalization_file"; then
+          normalization_detail="$(cat "$normalization_file" 2>/dev/null)"
+          [[ -n "$normalization_detail" ]] || normalization_detail="invalid verdict format"
+          attempts+=("$reviewer_name ($model): invalid review output ($normalization_detail)")
+          diagnostics+=("$reviewer_name (\`$model\`): invalid review output, $normalization_detail")
+          rm -f "$actual_model_file" "$detail_file" "$normalized_review_file" "$normalized_review_file.raw" "$normalization_file"
+          echo "  ↳ $reviewer_name ($model) returned invalid review output, trying next reviewer/model..." >&2
+          continue
+        fi
+
+        review="$(cat "$normalized_review_file" 2>/dev/null)"
+        normalization_detail="$(cat "$normalization_file" 2>/dev/null)"
+        if [[ -n "$normalization_detail" ]]; then
+          normalizations+=("$reviewer_name (\`$model\`): $normalization_detail")
+        fi
+        rm -f "$normalized_review_file" "$normalized_review_file.raw" "$normalization_file"
+
         verdict="$(printf '%s\n' "$review" | first_review_line)"
         reviewer_link="$(reviewer_url "$reviewer")"
         actual_model="$(cat "$actual_model_file" 2>/dev/null)"
@@ -706,14 +923,26 @@ review_pr() {
           footer="> Reviewed by **$reviewer_name** (model: \`$model\`)"
         fi
         [[ -n "$reviewer_link" ]] && footer="$footer via [$reviewer_name]($reviewer_link)"
-        rm -f "$actual_model_file"
+        rm -f "$actual_model_file" "$detail_file"
 
         write_pr_body "$pr_number" "$review
 
 ---
 $footer"
 
-        if [[ "$verdict" == APPROVED* ]]; then
+        if [[ "${#diagnostics[@]}" -gt 0 || "${#normalizations[@]}" -gt 0 ]]; then
+          diagnostics_body="$(build_review_diagnostics_body \
+            "$reviewer_name" \
+            "$model" \
+            "$actual_model" \
+            "$(lines_from_array "${diagnostics[@]}")" \
+            "$(lines_from_array "${normalizations[@]}")")"
+          upsert_review_diagnostics_comment "$pr_number" "$diagnostics_body"
+        else
+          delete_review_diagnostics_comment "$pr_number"
+        fi
+
+        if [[ "$verdict" == "APPROVED" ]]; then
           return 0
         fi
 
@@ -721,14 +950,21 @@ $footer"
         return 1
       fi
 
+      raw_detail="$(cat "$detail_file" 2>/dev/null)"
+      detail="$(printf '%s' "$raw_detail" | sanitize_review_detail)"
+      [[ -n "$detail" ]] || detail="no diagnostic detail"
+
       if [[ $try_exit -eq 127 ]]; then
         attempts+=("$reviewer_name ($model): CLI not found")
+        diagnostics+=("$reviewer_name (\`$model\`): CLI not found")
       elif [[ -z "$try_output" ]]; then
-        attempts+=("$reviewer_name ($model): empty response, exit=$try_exit")
+        attempts+=("$reviewer_name ($model): empty response, exit=$try_exit, $detail")
+        diagnostics+=("$reviewer_name (\`$model\`): failed, exit=$try_exit, $detail")
       else
-        attempts+=("$reviewer_name ($model): $(printf '%s\n' "$try_output" | first_review_line), exit=$try_exit")
+        attempts+=("$reviewer_name ($model): $(printf '%s\n' "$try_output" | first_review_line), exit=$try_exit, $detail")
+        diagnostics+=("$reviewer_name (\`$model\`): failed, exit=$try_exit, $detail")
       fi
-      rm -f "$actual_model_file"
+      rm -f "$actual_model_file" "$detail_file"
       echo "  ↳ $reviewer_name ($model) failed (exit=$try_exit), trying next reviewer/model..." >&2
     done
   done
@@ -745,9 +981,22 @@ Attempted reviewers:"
 Please review this backup manually before merging."
 
   write_pr_body "$pr_number" "$failure_body"
+  if [[ "${#diagnostics[@]}" -gt 0 || "${#normalizations[@]}" -gt 0 ]]; then
+    diagnostics_body="$(build_review_diagnostics_body \
+      "none" \
+      "none" \
+      "none" \
+      "$(lines_from_array "${diagnostics[@]}")" \
+      "$(lines_from_array "${normalizations[@]}")")"
+    upsert_review_diagnostics_comment "$pr_number" "$diagnostics_body"
+  fi
   notify_error "AI review failed — PR #$pr_number left open" "$pr_url"
   return 1
 }
+
+if [[ "${DOTFILES_AUTOBACKUP_SOURCE_ONLY:-}" == true ]]; then
+  return 0 2>/dev/null || exit 0
+fi
 
 # ── Test mode (--test) ───────────────────────────────────────────
 # Stays on current dev branch. Pushes, creates PR if needed, runs review.
@@ -858,9 +1107,12 @@ STASHED=false
 if [[ "$ORIGINAL_BRANCH" != "$DEVICE_BRANCH" ]]; then
   NEEDS_RESTORE=true
 
-  # Stash any uncommitted work
+  # Stash any uncommitted work, including new files from in-progress feature work.
   if ! git diff --quiet || ! git diff --cached --quiet; then
-    git stash push -m "auto-backup-temp" > /dev/null 2>&1
+    git stash push --include-untracked -m "auto-backup-temp" > /dev/null 2>&1
+    STASHED=true
+  elif [[ -n "$(git ls-files --others --exclude-standard)" ]]; then
+    git stash push --include-untracked -m "auto-backup-temp" > /dev/null 2>&1
     STASHED=true
   fi
 
