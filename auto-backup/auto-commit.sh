@@ -419,10 +419,35 @@ sanitize_review_detail() {
   else
     cat
   fi | python3 -c '
+import json
 import re
 import sys
 
 text = sys.stdin.read()
+
+def compact_json_detail(value):
+    try:
+        data = json.loads(value)
+    except json.JSONDecodeError:
+        return value
+    if not isinstance(data, dict):
+        return value
+
+    result = str(data.get("result") or data.get("error") or data.get("message") or "").strip()
+    status = data.get("api_error_status") or data.get("status")
+    if not result:
+        return value
+
+    result = re.sub(r"\s+", " ", result).strip()
+    if status:
+        result = re.sub(r"(?i)\bAPI Error:\s*" + re.escape(str(status)) + r"\s*", "", result).strip()
+        result = re.sub(r"(?i)\bInvalid authentication credentials\b\.?", "Invalid authentication credentials", result).strip()
+        if result and not result.endswith("."):
+            result += "."
+        return f"API {status}: {result}"
+    return result
+
+text = compact_json_detail(text)
 text = re.sub(r"\s+", " ", text).strip()
 patterns = [
     r"(?i)\bauthorization\b\s*[:=]\s*bearer\s+[^\s,;]+",
@@ -435,6 +460,47 @@ for pattern in patterns:
 if len(text) > 240:
     text = text[:237].rstrip() + "..."
 print(text)
+'
+}
+
+format_review_fallback_reason() {
+  local diagnostics_text="$1"
+
+  printf '%s' "$diagnostics_text" | python3 -c '
+import re
+import sys
+
+text = sys.stdin.read()
+lines = [line.strip() for line in text.splitlines() if line.strip()]
+if not lines:
+    sys.exit(0)
+
+auth_attempts = []
+all_auth = True
+for line in lines:
+    match = re.match(
+        r"^Claude \(`([^`]+)`\): failed, exit=(\d+), API (\d+): (.*)$",
+        line,
+    )
+    if not match:
+        all_auth = False
+        break
+    model, _exit_code, status, detail = match.groups()
+    if status != "401" or "authenticat" not in detail.lower():
+        all_auth = False
+        break
+    auth_attempts.append((model, status, detail))
+
+if all_auth and auth_attempts:
+    print("Claude authentication failed for all configured models:")
+    for model, status, detail in auth_attempts:
+        summary = "invalid authentication credentials"
+        if "invalid authentication credentials" not in detail.lower():
+            summary = detail.rstrip(".")
+        print(f"- `{model}`: API {status}, {summary}")
+else:
+    for line in lines:
+        print(f"- {line}")
 '
 }
 
@@ -562,7 +628,7 @@ build_review_diagnostics_body() {
   local final_actual_model="$3"
   local diagnostics_text="$4"
   local normalizations_text="$5"
-  local body marker item
+  local body marker item fallback_reason_text
 
   marker="$(review_diagnostics_marker)"
   body="$marker
@@ -571,14 +637,15 @@ build_review_diagnostics_body() {
 Final reviewer: $final_reviewer (model: \`$final_actual_model\`, configured: \`$final_model\`)"
 
   if [[ -n "$diagnostics_text" ]]; then
+    fallback_reason_text="$(format_review_fallback_reason "$diagnostics_text")"
     body="$body
 
-Attempts before final reviewer:"
+Fallback reason:"
     while IFS= read -r item || [[ -n "$item" ]]; do
       [[ -n "$item" ]] || continue
       body="$body
-- $item"
-    done <<< "$diagnostics_text"
+$item"
+    done <<< "$fallback_reason_text"
   fi
 
   if [[ -n "$normalizations_text" ]]; then
