@@ -126,6 +126,14 @@ test_sanitize_authorization_bearer() {
   [[ "$sanitized" == *"failed with 401"* ]] || fail "non-secret diagnostic detail was lost"
 }
 
+test_sanitize_claude_json_auth_error() {
+  local raw sanitized
+  raw='{"type":"result","subtype":"success","is_error":true,"api_error_status":401,"duration_ms":2518,"result":"Failed to authenticate. API Error: 401 Invalid authentication credentials","stop_reason":"stop_sequence"}'
+  sanitized="$(sanitize_review_detail "$raw")"
+
+  assert_eq "API 401: Failed to authenticate. Invalid authentication credentials." "$sanitized" "claude json auth detail"
+}
+
 test_auto_commit_stashes_untracked_work() {
   if ! grep -q 'git stash push --include-untracked -m "auto-backup-temp"' "$SCRIPT_DIR/auto-commit.sh"; then
     fail "auto-commit does not include untracked files in its temporary stash"
@@ -171,7 +179,7 @@ test_review_pr_falls_back_and_writes_diagnostics() {
     local detail_file="$7"
 
     if [[ "$reviewer" == "claude" ]]; then
-      printf '%s\n' 'Failed to authenticate. API Error: 401 Invalid authentication credentials' > "$detail_file"
+      printf '%s\n' '{"type":"result","subtype":"success","is_error":true,"api_error_status":401,"duration_ms":2518,"result":"Failed to authenticate. API Error: 401 Invalid authentication credentials","stop_reason":"stop_sequence"}' > "$detail_file"
       return 1
     fi
 
@@ -215,7 +223,12 @@ FIXTURE
   [[ "$body" == *'Reviewed by **Codex** (model: `gpt-5.5`, configured: `default`)'* ]] || fail "codex footer missing"
   [[ "$comment" == *'<!-- dotfiles-auto-review-diagnostics -->'* ]] || fail "diagnostics marker missing"
   [[ "$comment" == *'Final reviewer: Codex (model: `gpt-5.5`, configured: `default`)'* ]] || fail "final reviewer diagnostic missing"
-  [[ "$comment" == *'Claude (`default`): failed, exit=1, Failed to authenticate. API Error: 401 Invalid authentication credentials'* ]] || fail "claude failure diagnostic missing"
+  [[ "$comment" == *'Fallback reason:'* ]] || fail "fallback reason heading missing"
+  [[ "$comment" == *'Claude authentication failed for all configured models:'* ]] || fail "compact claude auth diagnostic missing"
+  [[ "$comment" == *'- `default`: API 401, invalid authentication credentials'* ]] || fail "default claude failure diagnostic missing"
+  [[ "$comment" == *'- `sonnet`: API 401, invalid authentication credentials'* ]] || fail "sonnet claude failure diagnostic missing"
+  [[ "$comment" == *'- `haiku`: API 401, invalid authentication credentials'* ]] || fail "haiku claude failure diagnostic missing"
+  [[ "$comment" != *'{"type":"result"'* ]] || fail "raw claude json leaked into diagnostics"
   [[ "$comment" == *'Codex (`default`): removed 1 preface line before APPROVED'* ]] || fail "normalization diagnostic missing"
   assert_eq "false" "$DELETE_DIAGNOSTICS_CALLED" "delete diagnostics should not run when diagnostics exist"
 }
@@ -285,6 +298,7 @@ test_multiple_verdicts_are_invalid
 test_correct_output_is_unchanged
 test_sanitize_attempt_reason
 test_sanitize_authorization_bearer
+test_sanitize_claude_json_auth_error
 test_auto_commit_stashes_untracked_work
 test_run_backup_skips_refresh_when_dirty
 test_review_pr_falls_back_and_writes_diagnostics
