@@ -8,7 +8,8 @@ Manages all applications via Homebrew formulae, casks, and Mac App Store (`mas`)
 ./install.sh          # runs: brew bundle --file=Brewfile
 ```
 
-This installs everything: CLI tools, desktop apps, Mac App Store apps, and VS Code extensions.
+This installs everything: CLI tools, desktop apps, Mac App Store apps, VS Code
+extensions, and global npm packages.
 
 ## Update the Brewfile
 
@@ -26,6 +27,7 @@ After dumping, it also scans `/Applications` for untracked apps and writes `untr
 | Browsers | Firefox, Google Chrome, Google Chrome Canary, Google Chrome Dev, Zen (manual) |
 | AI Tools | ChatGPT, Claude, Codex, LM Studio, Ollama |
 | Dev Tools | Cursor, DBeaver, Docker, Ghostty, Postman, Studio 3T, VS Code, Zed |
+| Global npm | Codex CLI, Gemini CLI, NestJS CLI, TypeScript, Vercel, and other npm globals |
 | Communication | Discord, Slack, Telegram, WhatsApp |
 | Productivity | Figma, Linear, Notion, Notion Calendar, Obsidian, Spotify |
 | Utilities | AnyDesk, AppCleaner, CodexBar, Helium, Logi Options+, MiddleClick, MultiViewer, Raycast |

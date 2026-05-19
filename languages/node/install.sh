@@ -7,8 +7,6 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 "$SCRIPT_DIR/nvm/install.sh"
 "$SCRIPT_DIR/bun/install.sh"
-"$SCRIPT_DIR/pnpm/install.sh"
 "$SCRIPT_DIR/yarn/install.sh"
-"$SCRIPT_DIR/globals/install.sh"
 
 print_manual_steps
