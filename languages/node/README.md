@@ -1,6 +1,10 @@
 # Node
 
-Manages the Node.js ecosystem: nvm, Bun, pnpm, and global npm packages.
+Manages Node.js runtime tooling and package-manager config.
+
+Global npm packages are managed by Homebrew Bundle through
+[`../../apps/Brewfile`](../../apps/Brewfile). `apps/backup.sh` captures them as
+`npm "..."` entries, and `apps/install.sh` restores them with `brew bundle`.
 
 ## Install
 
@@ -13,8 +17,7 @@ Or individually:
 ```bash
 ./nvm/install.sh
 ./bun/install.sh
-./pnpm/install.sh
-./globals/install.sh
+./yarn/install.sh
 ```
 
 ## Install Methods
@@ -23,18 +26,15 @@ Or individually:
 |---|---|
 | **nvm** | Official install script via `curl` |
 | **Bun** | `brew install bun` |
-| **pnpm** | Standalone install script via `curl` |
-| **Global packages** | Installed from `globals/npm-globals.txt` via `npm install -g` |
+| **pnpm** | Installed from `apps/Brewfile` via Homebrew |
+| **Yarn config** | Restored by `yarn/install.sh` |
+| **Global npm packages** | Installed from `apps/Brewfile` via `brew bundle` |
 
 ## Backup
 
-```bash
-# Export global packages list
-./globals/backup.sh
-```
-
-This writes all globally installed npm and pnpm packages to `globals/npm-globals.txt`.
+Global npm packages are backed up as part of `../../apps/backup.sh`.
 
 ## Update
 
-After installing a new global package, run `./globals/backup.sh` to update the list. After installing nvm, restart your shell and run `nvm install --lts`.
+After installing a new global npm package, run `../../apps/backup.sh` to update
+the Brewfile. After installing nvm, restart your shell and run `nvm install --lts`.
