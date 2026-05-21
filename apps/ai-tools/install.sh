@@ -8,6 +8,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 "$SCRIPT_DIR/claude/install.sh"
 "$SCRIPT_DIR/codex/install.sh"
 "$SCRIPT_DIR/gemini/install.sh"
+"$SCRIPT_DIR/antigravity/install.sh"
 "$SCRIPT_DIR/opencode/install.sh"
 "$SCRIPT_DIR/t3code/install.sh"
 
