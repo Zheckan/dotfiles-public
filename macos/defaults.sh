@@ -84,7 +84,7 @@ defaults write com.apple.WindowManager EnableStandardClickToShowDesktop -bool tr
 defaults write com.apple.WindowManager HideDesktop -bool false
 defaults write com.apple.WindowManager StageManagerHideWidgets -bool false
 defaults write com.apple.WindowManager StandardHideWidgets -bool false
-defaults write com.apple.screencapture style -string "selection"
+defaults write com.apple.screencapture style -string "display"
 defaults write com.apple.screencapture video -bool true
 defaults write com.apple.AppleMultitouchTrackpad ActuateDetents -int 1
 defaults write com.apple.AppleMultitouchTrackpad DragLock -int 0
