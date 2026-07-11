@@ -32,7 +32,7 @@ Or run each editor independently:
 
 > **Profile runtime state excluded:** `profiles/<id>/globalStorage/`, `workspaceStorage/`, `History/`, `logs/`, `CachedData/`, `Backups/` are SQLite state DBs and caches — device-local and not versioned.
 >
-> **`globalStorage/storage.json` restore:** contains the `userDataProfiles` name→directory mapping plus device-specific telemetry IDs. `install.sh` does *not* overwrite it automatically; inspect and copy manually on a fresh machine.
+> **`globalStorage/storage.json` restore:** contains a sanitized `userDataProfiles` name→directory mapping. `install.sh` does *not* overwrite it automatically; inspect and copy manually on a fresh machine.
 
 ## Update Configs
 
