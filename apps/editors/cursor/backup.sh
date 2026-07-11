@@ -60,21 +60,9 @@ fi
 ensure_dir "$SCRIPT_DIR/globalStorage"
 STORAGE_SRC="$CURSOR_USER_DIR/globalStorage/storage.json"
 STORAGE_DST="$SCRIPT_DIR/globalStorage/storage.json"
+STORAGE_SANITIZER="$SCRIPT_DIR/../sanitize-profile-storage.py"
 if [[ -f "$STORAGE_SRC" ]] && command_exists python3; then
-  python3 - "$STORAGE_SRC" "$STORAGE_DST" <<'PY'
-import json, sys
-src, dst = sys.argv[1], sys.argv[2]
-with open(src) as f:
-    data = json.load(f)
-# Whitelist: only keep fields useful for reconstructing profile identity on a
-# fresh machine. Drop workspace paths, recent files, backup lists, open windows,
-# and anything else that leaks local filesystem state.
-KEEP = {"userDataProfiles", "userDataProfilesMigration", "profileAssociationsMigration"}
-sanitized = {k: data[k] for k in KEEP if k in data}
-with open(dst, "w") as f:
-    json.dump(sanitized, f, indent=2)
-    f.write("\n")
-PY
+  python3 "$STORAGE_SANITIZER" "$STORAGE_SRC" "$STORAGE_DST"
   log_info "Backed up sanitized Cursor profile metadata → $STORAGE_DST"
 elif [[ -f "$STORAGE_SRC" ]]; then
   log_warn "python3 not found — skipping storage.json backup to avoid committing workspace paths"
