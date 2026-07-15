@@ -147,6 +147,46 @@ test_run_backup_skips_refresh_when_dirty() {
     fail "run-backup does not skip pre-run script refresh when dirty"
 }
 
+test_autobackup_uses_nvm_default_for_npm_backup() {
+  local script
+
+  for script in "$SCRIPT_DIR/run-backup.sh" "$SCRIPT_DIR/auto-commit.sh"; do
+    grep -Fq 'source "$NVM_DIR/nvm.sh" --no-use' "$script" ||
+      fail "$script does not load nvm for non-interactive use"
+    grep -Fq 'nvm use --silent default' "$script" ||
+      fail "$script does not activate nvm's configured default version"
+    if grep -Fq 'ls "$HOME/.nvm/versions/node/"' "$script"; then
+      fail "$script still chooses Node by lexicographic directory order"
+    fi
+  done
+
+  grep -q '^npm ' "$REPO_DIR/apps/Brewfile" ||
+    fail "Brewfile does not contain the npm globals returned by the default Node dump"
+}
+
+test_review_prompt_blocks_wholesale_package_backup_deletions() {
+  local prompt="$REPO_DIR/.github/review-prompt.md"
+  local cli_prompt
+
+  grep -Fq 'all `npm` entries' "$prompt" ||
+    fail "review prompt does not name wholesale npm entry removal as an example"
+  grep -Fq 'must return `CHANGES_REQUESTED`' "$prompt" ||
+    fail "review prompt does not require a blocking verdict for package backup loss"
+  grep -Fq 'section is critical, not a warning' "$prompt" ||
+    fail "package-change warning does not defer wholesale section removal to critical handling"
+  grep -Fq 'Any critical finding requires `CHANGES_REQUESTED`' "$prompt" ||
+    fail "review prompt does not map critical findings to the blocking verdict"
+
+  for cli_prompt in \
+    "$REPO_DIR/AGENTS.md" \
+    "$REPO_DIR/.github/instructions/backup-review.instructions.md"; do
+    grep -Fq 'all `npm` entries' "$cli_prompt" ||
+      fail "$cli_prompt does not name wholesale npm entry removal as an example"
+    grep -Fq '`CHANGES_REQUESTED`' "$cli_prompt" ||
+      fail "$cli_prompt does not require a blocking verdict for package backup loss"
+  done
+}
+
 test_review_pr_falls_back_and_writes_diagnostics() {
   local body comment
   LAST_PR_BODY=""
@@ -301,6 +341,8 @@ test_sanitize_authorization_bearer
 test_sanitize_claude_json_auth_error
 test_auto_commit_stashes_untracked_work
 test_run_backup_skips_refresh_when_dirty
+test_autobackup_uses_nvm_default_for_npm_backup
+test_review_prompt_blocks_wholesale_package_backup_deletions
 test_review_pr_falls_back_and_writes_diagnostics
 test_review_pr_deletes_stale_diagnostics_on_clean_success
 

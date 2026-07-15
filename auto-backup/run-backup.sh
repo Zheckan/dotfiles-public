@@ -14,7 +14,13 @@
 
 # Load Homebrew and user PATH (for non-interactive environments)
 eval "$(/opt/homebrew/bin/brew shellenv 2>/dev/null)" || true
-export PATH="$HOME/.nvm/versions/node/$(ls "$HOME/.nvm/versions/node/" 2>/dev/null | tail -1)/bin:$PATH" 2>/dev/null || true
+NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
+if [[ -s "$NVM_DIR/nvm.sh" ]]; then
+  export NVM_DIR
+  # shellcheck source=/dev/null
+  source "$NVM_DIR/nvm.sh" --no-use
+  nvm use --silent default > /dev/null 2>&1 || true
+fi
 export PATH="/usr/local/bin:$HOME/.local/bin:$PATH"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
