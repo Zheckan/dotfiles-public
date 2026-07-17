@@ -7,8 +7,9 @@
 - This may not work for you or your machine. It is highly personal and probably too hardcoded.
 - This may not support backup for what you need, but you have a template. Figure it out and submit a PR if you really need it.
 
-This repository is a public scripts-only shell of my private macOS dotfiles repo.
-Things are auto-backed up when I update or add new scripts, so be careful.
+This repository is a public scripts and agent-instructions shell of my private macOS
+dotfiles repo. Things are auto-backed up when I update scripts or their safety rules,
+so be careful.
 
 The scripts are personal and opinionated, but they can be useful as a reference or
 as a starting point for your own macOS dotfiles workflow. **Read before running.**
@@ -69,6 +70,16 @@ authenticate that provider before enabling PR review. Claude, Codex, and Gemini 
 tested adapters; OpenCode, Cursor, and Ollama are experimental selectors that fail
 closed. If no configured reviewer can produce a usable review, the PR stays open for
 manual review.
+
+The shared auto-backup review policy lives in `.github/review-prompt.md`. Repository
+instructions in `AGENTS.md`, its `CLAUDE.md` compatibility symlink, and
+`.github/instructions/` give CLI agents and GitHub Copilot the same safety boundaries
+when reviewing public-fork changes.
+
+The repository audit command lives in `.claude/commands/audit.md`, with
+`.agents/commands/audit.md` as a compatibility symlink for agent UIs that discover
+commands there. It inventories apps, configurations, packages, extensions, and
+services that the current checkout does not yet track.
 
 ## Auto-Backup Setup
 

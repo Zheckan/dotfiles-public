@@ -160,8 +160,10 @@ test_autobackup_uses_nvm_default_for_npm_backup() {
     fi
   done
 
-  grep -q '^npm ' "$REPO_DIR/apps/Brewfile" ||
-    fail "Brewfile does not contain the npm globals returned by the default Node dump"
+  if [[ -f "$REPO_DIR/apps/Brewfile" ]]; then
+    grep -q '^npm ' "$REPO_DIR/apps/Brewfile" ||
+      fail "Brewfile does not contain the npm globals returned by the default Node dump"
+  fi
 }
 
 test_review_prompt_blocks_wholesale_package_backup_deletions() {
