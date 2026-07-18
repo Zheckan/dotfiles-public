@@ -1,6 +1,6 @@
 # AI Tools
 
-Manages configuration for AI coding assistants: Claude Code, Codex, Gemini CLI, Antigravity, OpenCode, and T3 Code.
+Manages shared agent skills and configuration for AI coding assistants: Claude Code, Codex, Gemini CLI, Antigravity, OpenCode, and T3 Code.
 
 ## Install
 
@@ -11,6 +11,7 @@ Manages configuration for AI coding assistants: Claude Code, Codex, Gemini CLI, 
 Or individually:
 
 ```bash
+./agents/install.sh
 ./claude/install.sh
 ./codex/install.sh
 ./gemini/install.sh
@@ -29,6 +30,7 @@ Or individually:
 
 | Tool | Config Location | Notes |
 |---|---|---|
+| **Shared agent skills** | `~/.agents/` | Skill lock file and installed skills shared by compatible agent tools. |
 | **Claude Code** | `~/.claude/` | Settings, keybindings, statusline script. Installed via `brew install --cask claude-code`. |
 | **Codex** | `~/.codex/` | Config, rules, custom agents, user skills, and custom pets. Install with `npm install -g @openai/codex`. |
 | **Gemini CLI** | `~/.gemini/` | Settings, `GEMINI.md`, commands, policies, and skills. Auth, project trust files, and runtime state are excluded. |
