@@ -5,6 +5,7 @@ log_section "AI Tools — Backup"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
+"$SCRIPT_DIR/agents/backup.sh"
 "$SCRIPT_DIR/claude/backup.sh"
 "$SCRIPT_DIR/codex/backup.sh"
 "$SCRIPT_DIR/gemini/backup.sh"
