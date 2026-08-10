@@ -11,14 +11,17 @@ copy_to_repo "$CLAUDE_CONFIG_DIR/settings.json" "$SCRIPT_DIR/settings.json"
 copy_to_repo "$CLAUDE_CONFIG_DIR/keybindings.json" "$SCRIPT_DIR/keybindings.json"
 copy_to_repo "$CLAUDE_CONFIG_DIR/statusline-command.sh" "$SCRIPT_DIR/statusline-command.sh"
 
-# Plugins list (strip machine-specific installPath)
+# Plugins list (strip machine-specific installPath and volatile lastUpdated).
+# Claude Code rewrites lastUpdated on every plugin update check even when
+# nothing changes, which produced a daily no-op backup commit. gitCommitSha
+# and version are kept — those move only on a real plugin update.
 if [[ -f "$CLAUDE_CONFIG_DIR/plugins/installed_plugins.json" ]]; then
   ensure_dir "$SCRIPT_DIR/plugins"
   tmp="$(mktemp)"
-  if jq 'walk(if type == "object" then del(.installPath) else . end)' \
+  if jq 'walk(if type == "object" then del(.installPath, .lastUpdated) else . end)' \
        "$CLAUDE_CONFIG_DIR/plugins/installed_plugins.json" > "$tmp"; then
     mv "$tmp" "$SCRIPT_DIR/plugins/installed_plugins.json"
-    log_info "Backed up installed_plugins.json (stripped installPath)"
+    log_info "Backed up installed_plugins.json (stripped installPath, lastUpdated)"
   else
     rm -f "$tmp"
     copy_to_repo "$CLAUDE_CONFIG_DIR/plugins/installed_plugins.json" "$SCRIPT_DIR/plugins/installed_plugins.json"

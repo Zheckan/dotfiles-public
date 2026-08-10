@@ -7,7 +7,23 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 CODEX_CONFIG_DIR="$HOME/.codex"
 
 # ── Config files (explicit whitelist) ────────────────────────────────
-copy_to_repo "$CODEX_CONFIG_DIR/config.toml"             "$SCRIPT_DIR/config.toml"
+# config.toml is sanitized to drop [marketplaces.*] last_updated/last_revision,
+# which Codex rewrites on every marketplace re-sync and which caused a daily
+# no-op backup commit. Real settings still come through verbatim.
+CONFIG_SANITIZER="$SCRIPT_DIR/sanitize-config.py"
+if [[ -f "$CODEX_CONFIG_DIR/config.toml" ]] && command_exists python3; then
+  tmp="$(mktemp)"
+  if python3 "$CONFIG_SANITIZER" "$CODEX_CONFIG_DIR/config.toml" "$tmp"; then
+    mv "$tmp" "$SCRIPT_DIR/config.toml"
+    log_info "Backed up config.toml (stripped marketplace refresh pointers)"
+  else
+    rm -f "$tmp"
+    copy_to_repo "$CODEX_CONFIG_DIR/config.toml" "$SCRIPT_DIR/config.toml"
+    log_warn "sanitize-config.py failed — backed up config.toml as-is"
+  fi
+else
+  copy_to_repo "$CODEX_CONFIG_DIR/config.toml"           "$SCRIPT_DIR/config.toml"
+fi
 copy_to_repo "$CODEX_CONFIG_DIR/config.json"              "$SCRIPT_DIR/config.json"
 copy_to_repo "$CODEX_CONFIG_DIR/instructions.md"          "$SCRIPT_DIR/instructions.md"
 copy_to_repo "$CODEX_CONFIG_DIR/AGENTS.md"                "$SCRIPT_DIR/AGENTS.md"
