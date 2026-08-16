@@ -54,7 +54,7 @@ show_cursor() {
 
 display_option() {
   case "$1" in
-    opencode|cursor|ollama) printf '%s (experimental)' "$1" ;;
+    cursor|ollama) printf '%s (experimental)' "$1" ;;
     *) printf '%s' "$1" ;;
   esac
 }
@@ -285,6 +285,17 @@ models_for_gemini_preset() {
   esac
 }
 
+# OpenCode takes provider/model strings. These presets use models from the
+# OpenCode provider list; "default" leads each chain so an unavailable pin falls
+# back instead of failing the reviewer outright.
+models_for_opencode_preset() {
+  case "$1" in
+    "Default only") printf 'default' ;;
+    "Default → Big Pickle") printf 'default,opencode/big-pickle' ;;
+    "Default → DeepSeek Pro") printf 'default,opencode-go/deepseek-v4-pro' ;;
+  esac
+}
+
 write_config() {
   local mode="$1"
   local rebase="$2"
@@ -293,6 +304,7 @@ write_config() {
   local claude_models="$5"
   local codex_models="$6"
   local gemini_models="$7"
+  local opencode_models="$8"
   local tmp_file backup_file
 
   tmp_file="$(mktemp "${TMPDIR:-/tmp}/dotfiles-config.env.XXXXXX")"
@@ -307,8 +319,8 @@ DOTFILES_AUTOBACKUP_MODE="$mode"
 DOTFILES_AUTOBACKUP_REBASE="$rebase"
 DOTFILES_AUTOBACKUP_REVIEW="$review"
 
-# Reviewers are tried in order. Claude, Codex, and Gemini are tested adapters.
-# OpenCode, Cursor, and Ollama are experimental selectors that fail closed.
+# Reviewers are tried in order. Claude, Codex, Gemini, and OpenCode are tested adapters.
+# Cursor and Ollama are experimental selectors that fail closed.
 # Fallback continues after missing CLIs, failed commands, empty output, or invalid verdict output.
 # A single misplaced verdict is repaired; fallback/repair details are kept in one PR comment.
 DOTFILES_REVIEWERS="$reviewers"
@@ -317,9 +329,9 @@ DOTFILES_REVIEWERS="$reviewers"
 DOTFILES_REVIEW_CLAUDE_MODELS="$claude_models"
 DOTFILES_REVIEW_CODEX_MODELS="$codex_models"
 DOTFILES_REVIEW_GEMINI_MODELS="$gemini_models"
+DOTFILES_REVIEW_OPENCODE_MODELS="$opencode_models"
 
 # Experimental selectors exist but fail closed until tested for unattended merge.
-# DOTFILES_REVIEW_OPENCODE_MODELS="default"
 # DOTFILES_REVIEW_CURSOR_MODELS="default"
 # DOTFILES_REVIEW_OLLAMA_MODELS="default"
 CONFIG
@@ -334,8 +346,8 @@ CONFIG
 
 main() {
   local mode_label mode rebase review selected_reviewers reviewers
-  local claude_preset codex_preset gemini_preset
-  local claude_models codex_models gemini_models repo_dir
+  local claude_preset codex_preset gemini_preset opencode_preset
+  local claude_models codex_models gemini_models opencode_models repo_dir
 
   parse_args "$@"
   require_tty
@@ -349,7 +361,7 @@ main() {
   mode="$mode_label"
   rebase="$(select_one "Rebase before backup" "true" "false")"
   review="$(select_one "Run AI review for PR modes" "true" "false")"
-  printf 'Claude, Codex, and Gemini reviewers are tested. OpenCode, Cursor, and Ollama are experimental fail-closed selectors.\n' >&2
+  printf 'Claude, Codex, Gemini, and OpenCode reviewers are tested. Cursor and Ollama are experimental fail-closed selectors.\n' >&2
   selected_reviewers="$(select_many "Reviewers to use" "claude" "codex" "gemini" "opencode" "cursor" "ollama")"
   reviewers="$(choose_reviewer_order "$selected_reviewers")"
   printf '✓ Reviewer fallback order: %s\n' "$reviewers" >&2
@@ -357,12 +369,15 @@ main() {
   claude_preset="$(select_one "Claude model fallback" "Stable aliases" "Default only" "Sonnet then Haiku")"
   codex_preset="$(select_one "Codex model fallback" "Default → GPT-5.4 → Mini" "Default only" "GPT-5.4 → Mini")"
   gemini_preset="$(select_one "Gemini model fallback" "Default → Gemini 3 Flash → Flash alias" "Default only" "Gemini 3 Flash → Flash alias")"
+  opencode_preset="$(select_one "OpenCode model fallback" "Default only" "Default → Big Pickle" "Default → DeepSeek Pro")"
 
   claude_models="$(models_for_claude_preset "$claude_preset")"
   codex_models="$(models_for_codex_preset "$codex_preset")"
   gemini_models="$(models_for_gemini_preset "$gemini_preset")"
+  opencode_models="$(models_for_opencode_preset "$opencode_preset")"
 
-  write_config "$mode" "$rebase" "$review" "$reviewers" "$claude_models" "$codex_models" "$gemini_models"
+  write_config "$mode" "$rebase" "$review" "$reviewers" \
+    "$claude_models" "$codex_models" "$gemini_models" "$opencode_models"
 
   repo_dir="$DEFAULT_REPO_DIR"
 
@@ -375,6 +390,7 @@ main() {
   printf '  claude        # if using Claude\n'
   printf '  codex login   # if using Codex\n'
   printf '  gemini        # if using Gemini\n'
+  printf '  opencode      # if using OpenCode\n'
 }
 
 main "$@"

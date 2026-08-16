@@ -119,6 +119,7 @@ DOTFILES_REVIEWERS="${DOTFILES_REVIEWERS:-}"
 DOTFILES_REVIEW_CLAUDE_MODELS="${DOTFILES_REVIEW_CLAUDE_MODELS:-}"
 DOTFILES_REVIEW_CODEX_MODELS="${DOTFILES_REVIEW_CODEX_MODELS:-}"
 DOTFILES_REVIEW_GEMINI_MODELS="${DOTFILES_REVIEW_GEMINI_MODELS:-}"
+DOTFILES_REVIEW_OPENCODE_MODELS="${DOTFILES_REVIEW_OPENCODE_MODELS:-}"
 
 # ── Flags ─────────────────────────────────────────────────────────
 # --main-pc    : Full flow — rebase, backup, review, PR, merge
@@ -772,6 +773,93 @@ with open(review_file, "w", encoding="utf-8") as fh:
 PY
 }
 
+parse_opencode_json_review() {
+  local jsonl_file="$1"
+  local review_file="$2"
+
+  python3 - "$jsonl_file" "$review_file" <<'PY' 2>/dev/null
+import json
+import sys
+
+jsonl_file, review_file = sys.argv[1:3]
+
+# `opencode run --format json` emits newline-delimited events. Assistant prose
+# arrives as {"type": "text", "part": {"id": ..., "text": ...}}. Observed
+# behaviour is one complete event per part, but key by part id and keep the
+# last value so a streamed part that is re-emitted as it grows is not
+# concatenated with its own prefixes.
+order = []
+texts = {}
+with open(jsonl_file, "r", encoding="utf-8") as fh:
+    for raw in fh:
+        raw = raw.strip()
+        if not raw:
+            continue
+        try:
+            event = json.loads(raw)
+        except Exception:
+            continue
+        if event.get("type") != "text":
+            continue
+        part = event.get("part") or {}
+        text = part.get("text") or ""
+        if not text:
+            continue
+        key = part.get("id") or len(order)
+        if key not in texts:
+            order.append(key)
+        texts[key] = text
+
+with open(review_file, "w", encoding="utf-8") as fh:
+    fh.write("\n".join(texts[key] for key in order))
+PY
+}
+
+run_opencode_review() {
+  local model="$1"
+  local prompt="$2"
+  local diff="$3"
+  local repo_root="$4"
+  local actual_model_file="$5"
+  local detail_file="$6"
+  local try_args=()
+  local tmp_json tmp_review tmp_error try_exit
+
+  command -v opencode &>/dev/null || return 127
+
+  # OpenCode reports no model id in its run events, so only a model that was
+  # requested explicitly can be echoed back; "default" leaves the file empty
+  # and the caller falls back to the configured name.
+  if [[ "$model" != "default" ]]; then
+    try_args=(-m "$model")
+    printf '%s' "$model" > "$actual_model_file"
+  fi
+
+  tmp_json="$(mktemp)"
+  tmp_review="$(mktemp)"
+  tmp_error="$(mktemp)"
+
+  # --agent plan is OpenCode's built-in read-only agent. The default `build`
+  # agent is configured with "*": "allow", which would let an unattended review
+  # edit the repo it is reviewing; this mirrors codex's --sandbox read-only.
+  printf '%s' "$diff" \
+    | opencode run --format json --agent plan --dir "$repo_root" "${try_args[@]}" "$prompt" \
+      > "$tmp_json" 2>"$tmp_error"
+  try_exit=$?
+
+  if [[ $try_exit -eq 0 ]] \
+    && parse_opencode_json_review "$tmp_json" "$tmp_review" \
+    && [[ -s "$tmp_review" ]]; then
+    cat "$tmp_review" 2>/dev/null
+  else
+    { cat "$tmp_error" 2>/dev/null; cat "$tmp_json" 2>/dev/null; } > "$detail_file"
+    [[ $try_exit -eq 0 ]] && try_exit=65
+  fi
+
+  rm -f "$tmp_json" "$tmp_review" "$tmp_error"
+  return "$try_exit"
+}
+
 run_claude_review() {
   local model="$1"
   local prompt="$2"
@@ -905,7 +993,8 @@ run_review_attempt() {
     claude) run_claude_review "$model" "$prompt" "$diff" "$actual_model_file" "$detail_file" ;;
     codex) run_codex_review "$model" "$prompt" "$diff" "$repo_root" "$actual_model_file" "$detail_file" ;;
     gemini) run_gemini_review "$model" "$prompt" "$diff" "$actual_model_file" "$detail_file" ;;
-    opencode|cursor|ollama) run_experimental_review "$reviewer" "$detail_file" ;;
+    opencode) run_opencode_review "$model" "$prompt" "$diff" "$repo_root" "$actual_model_file" "$detail_file" ;;
+    cursor|ollama) run_experimental_review "$reviewer" "$detail_file" ;;
     *) return 64 ;;
   esac
 }
@@ -1264,10 +1353,14 @@ echo "$CHANGED_FILES" | grep -q "^apps/ai-tools/codex/" && SUMMARY="$SUMMARY, Co
 echo "$CHANGED_FILES" | grep -q "^apps/ai-tools/gemini/" && SUMMARY="$SUMMARY, Gemini"
 echo "$CHANGED_FILES" | grep -q "^apps/ai-tools/antigravity/" && SUMMARY="$SUMMARY, Antigravity"
 echo "$CHANGED_FILES" | grep -q "^apps/ai-tools/opencode/" && SUMMARY="$SUMMARY, OpenCode"
+echo "$CHANGED_FILES" | grep -q "^apps/ai-tools/agents/" && SUMMARY="$SUMMARY, Agent Skills"
+echo "$CHANGED_FILES" | grep -q "^apps/ai-tools/t3code/" && SUMMARY="$SUMMARY, T3 Code"
 echo "$CHANGED_FILES" | grep -q "^cli/ssh/" && SUMMARY="$SUMMARY, SSH"
 echo "$CHANGED_FILES" | grep -q "^cli/misc/" && SUMMARY="$SUMMARY, CLI misc"
 echo "$CHANGED_FILES" | grep -q "^languages/node/" && SUMMARY="$SUMMARY, Node"
 echo "$CHANGED_FILES" | grep -q "^languages/python/" && SUMMARY="$SUMMARY, Python"
+echo "$CHANGED_FILES" | grep -q "^fonts/" && SUMMARY="$SUMMARY, Fonts"
+echo "$CHANGED_FILES" | grep -q "^apps/multiviewer/" && SUMMARY="$SUMMARY, MultiViewer"
 echo "$CHANGED_FILES" | grep -q "^macos/" && SUMMARY="$SUMMARY, macOS"
 echo "$CHANGED_FILES" | grep -q "^history/" && SUMMARY="$SUMMARY, History"
 SUMMARY="${SUMMARY#, }"

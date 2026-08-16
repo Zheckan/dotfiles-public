@@ -38,6 +38,8 @@ run_backup "AI Tools — Codex"      "$DOTFILES_DIR/apps/ai-tools/codex/backup.s
 run_backup "AI Tools — Gemini"     "$DOTFILES_DIR/apps/ai-tools/gemini/backup.sh"
 run_backup "AI Tools — Antigravity" "$DOTFILES_DIR/apps/ai-tools/antigravity/backup.sh"
 run_backup "AI Tools — OpenCode"   "$DOTFILES_DIR/apps/ai-tools/opencode/backup.sh"
+run_backup "AI Tools — Agent Skills" "$DOTFILES_DIR/apps/ai-tools/agents/backup.sh"
+run_backup "AI Tools — T3 Code"    "$DOTFILES_DIR/apps/ai-tools/t3code/backup.sh"
 run_backup "SSH"                   "$DOTFILES_DIR/cli/ssh/backup.sh"
 run_backup "Misc — GitHub CLI"     "$DOTFILES_DIR/cli/misc/gh/backup.sh"
 run_backup "Misc — mise"           "$DOTFILES_DIR/cli/misc/mise/backup.sh"

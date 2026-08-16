@@ -34,4 +34,11 @@ if [[ -d "$SCRIPT_DIR/skills" ]]; then
   log_info "Restored $SCRIPT_DIR/skills → $CODEX_CONFIG_DIR/skills"
 fi
 
+# Credentials are redacted out of the backed-up config.toml, so a restored
+# machine needs them pasted back before those MCP servers will authenticate.
+if [[ -f "$CODEX_CONFIG_DIR/config.toml" ]] \
+  && grep -q 'REDACTED_SET_THIS_SECRET_ON_RESTORE' "$CODEX_CONFIG_DIR/config.toml"; then
+  log_manual "Replace REDACTED_SET_THIS_SECRET_ON_RESTORE in $CODEX_CONFIG_DIR/config.toml with the real credential(s)"
+fi
+
 log_manual "Run 'codex' to authenticate with OpenAI"
