@@ -65,11 +65,12 @@ The review/auto-merge path runs `gh pr diff`, pipes that diff into the configure
 reviewer CLIs in order, then writes the review into the PR description. Those CLIs
 must already be installed and authenticated because the script runs unattended from
 Shortcuts or LaunchAgent and cannot complete login prompts. By default the config tries
-Claude first, then Codex and Gemini as fallbacks; if you choose a different provider,
-authenticate that provider before enabling PR review. Claude, Codex, and Gemini are
-tested adapters; OpenCode, Cursor, and Ollama are experimental selectors that fail
-closed. If no configured reviewer can produce a usable review, the PR stays open for
-manual review.
+Claude first, then Codex, Gemini, and OpenCode as fallbacks; if you choose a different
+provider, authenticate that provider before enabling PR review. Claude, Codex, Gemini,
+and OpenCode are tested adapters; Cursor and Ollama are experimental selectors that
+fail closed. OpenCode runs under its read-only `plan` agent so an unattended review
+cannot edit the repo it is reviewing. If no configured reviewer can produce a usable
+review, the PR stays open for manual review.
 
 The shared auto-backup review policy lives in `.github/review-prompt.md`. Repository
 instructions in `AGENTS.md`, its `CLAUDE.md` compatibility symlink, and

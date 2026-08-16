@@ -73,7 +73,7 @@ Key config values:
 DOTFILES_AUTOBACKUP_MODE="main-pc"        # device-only | main-pc | pr-only | test
 DOTFILES_AUTOBACKUP_REBASE="true"        # true | false
 DOTFILES_AUTOBACKUP_REVIEW="true"        # true | false
-DOTFILES_REVIEWERS="claude,codex,gemini" # comma-separated reviewer fallback order
+DOTFILES_REVIEWERS="claude,codex,gemini,opencode" # comma-separated reviewer fallback order
 DOTFILES_REVIEW_CLAUDE_MODELS="default,sonnet,haiku"
 DOTFILES_REVIEW_CODEX_MODELS="default,gpt-5.4,gpt-5.4-mini"
 DOTFILES_REVIEW_GEMINI_MODELS="default,gemini-3-flash-preview,flash"
@@ -91,7 +91,7 @@ To generate a config interactively:
 
 The setup script uses arrow-key menus. For reviewers, Space selects one or more
 providers, then the script asks for the default reviewer first and fallback reviewers
-after that. Claude, Codex, and Gemini are tested adapters; OpenCode, Cursor, and
+after that. Claude, Codex, Gemini, and OpenCode are tested adapters; Cursor and
 Ollama are experimental selectors that fail closed. By default the script writes
 ignored machine-local overrides to `auto-backup/config.local.env` and prints the
 Shortcuts shell snippet to use. Use `./auto-backup/configure.sh --tracked` only when
@@ -107,8 +107,8 @@ you intentionally want to change repo-wide defaults in `auto-backup/config.env`.
 | `--test` | Test mode: stay on current dev branch, push, create PR, review (no backup, no merge) |
 | `--no-rebase` | Skip rebase on main. Combinable with any flag above |
 | `--no-review` | Skip AI review. Combinable with any flag above |
-| `--claude`, `--codex`, `--gemini` | Select AI reviewers in flag order |
-| `--opencode`, `--cursor`, `--ollama` | Experimental reviewer selectors; fail closed until enabled/tested |
+| `--claude`, `--codex`, `--gemini`, `--opencode` | Select AI reviewers in flag order |
+| `--cursor`, `--ollama` | Experimental reviewer selectors; fail closed until enabled/tested |
 
 ### What each step does
 
@@ -202,14 +202,20 @@ Supported reviewers:
 | Claude | Default, tested | `claude -p` |
 | Codex | Tested | `codex exec --sandbox read-only` |
 | Gemini | Tested | `gemini -o text` |
-| OpenCode | Experimental, untested | Selector exists, but fails closed |
+| OpenCode | Tested, fallback of last resort | `opencode run --format json --agent plan` |
 | Cursor | Experimental, untested | Selector exists, but fails closed |
 | Ollama | Experimental, untested | Selector exists, but fails closed |
+
+OpenCode runs under `--agent plan`, its built-in read-only agent, because the
+default `build` agent is configured with `"*": "allow"` and could edit the repo it
+is reviewing. This matches the read-only sandbox used for Codex.
 
 The PR body footer records which reviewer and model produced the review. Claude and
 Gemini use model usage metadata from JSON output. Codex JSON output does not include
 a resolved model field, so `default` is resolved from `~/.codex/config.toml` when
-available; explicit Codex models are recorded directly.
+available; explicit Codex models are recorded directly. OpenCode's run events carry
+no model id either, and it pins no default model in `opencode.json`, so an explicit
+model is recorded as configured and `default` is reported as `default`.
 
 ### Review flow
 
