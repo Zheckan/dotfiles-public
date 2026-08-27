@@ -53,7 +53,7 @@ log_info "  3. Set your preferred schedule (e.g. daily at 2 AM, or specific days
 log_info "  4. Action: 'Run Shortcut' → select '$SHORTCUT_NAME'"
 log_info "  5. Toggle OFF 'Ask Before Running' for silent execution"
 log_info ""
-log_info "Note: The script auto-detects device and reads mode/reviewer defaults from auto-backup/config.env."
+log_info "Note: Run auto-backup/configure.sh first; the script reads mode and reviewers from ignored config.local.toml."
 log_info "  This private repo defaults to main-pc mode, which creates a PR and merges when review approves."
 log_info ""
 log_info "You can also run the shortcut manually anytime:"

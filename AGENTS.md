@@ -91,11 +91,12 @@ rather than copying the file through. The matching `install.sh` raises a
 
 ### Config keys have generators that also need updating
 
-Adding a `DOTFILES_*` key means updating all of: `auto-backup/config.env`,
-`auto-backup/configure.sh` (both the prompt and `write_config`), and
-`.opensource/scripts/export-public.sh` (which generates the public mirror's
-config). Skipping a generator leaves the feature silently unconfigured for anyone
-who regenerates their config.
+Adding a machine setting means updating all of: `auto-backup/config.py` validation
+and shell flattening, the `auto-backup/configure.py` wizard and config renderer, and
+`auto-backup/config.example.toml`. Keep `configure.sh` as the stable thin launcher.
+Update public export allowlists when adding a supporting artifact. Skipping the
+generator leaves the feature silently unconfigured for anyone who regenerates
+required `config.local.toml`.
 
 ### Assert the property that matters, not an intermediate link
 
