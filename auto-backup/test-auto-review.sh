@@ -17,16 +17,246 @@ assert_eq() {
   [[ "$actual" == "$expected" ]] || fail "$label: expected [$expected], got [$actual]"
 }
 
+test_toml_config_loader_validates_and_flattens_settings() {
+  local work_dir config output
+  work_dir="$(mktemp -d "${TMPDIR:-/tmp}/dotfiles-config-test.XXXXXX")"
+  config="$work_dir/config.local.toml"
+
+  cat > "$config" <<'TOML'
+[backup]
+mode = "pr-only"
+rebase = false
+
+[review]
+enabled = true
+reviewers = ["agy", "opencode"]
+
+[review.models]
+agy = ["gemini-3.7-flash-low", "claude-sonnet-4-6"]
+opencode = ["opencode/muse-spark-1.2-contributor-free"]
+TOML
+
+  output="$(python3 "$SCRIPT_DIR/config.py" "$config")"
+  [[ "$output" == *$'DOTFILES_AUTOBACKUP_MODE\tpr-only'* ]] ||
+    fail "TOML mode was not flattened"
+  [[ "$output" == *$'DOTFILES_AUTOBACKUP_REBASE\tfalse'* ]] ||
+    fail "TOML boolean was not flattened"
+  [[ "$output" == *$'DOTFILES_REVIEWERS\tagy,opencode'* ]] ||
+    fail "TOML reviewer order was not flattened"
+  [[ "$output" == *$'DOTFILES_REVIEW_AGY_MODELS\tgemini-3.7-flash-low,claude-sonnet-4-6'* ]] ||
+    fail "TOML AGY models were not flattened"
+
+  cat > "$config" <<'TOML'
+[backup]
+mode = "main-pc"
+rebase = true
+unexpected = "unsafe"
+
+[review]
+enabled = false
+reviewers = []
+
+[review.models]
+TOML
+  if python3 "$SCRIPT_DIR/config.py" "$config" >"$work_dir/output" 2>"$work_dir/error"; then
+    fail "unknown TOML keys should be rejected"
+  fi
+  [[ "$(<"$work_dir/error")" == *"unsupported key"* ]] ||
+    fail "invalid TOML did not explain the unsupported key"
+
+  rm -rf "$work_dir"
+}
+
+write_test_config() {
+  local path="$1"
+
+  cat > "$path" <<'TOML'
+[backup]
+mode = "test"
+rebase = true
+
+[review]
+enabled = true
+reviewers = ["claude"]
+
+[review.models]
+claude = ["default"]
+TOML
+}
+
 source_helpers() {
-  local stub_dir
+  local stub_dir config_file
   stub_dir="$(mktemp -d "${TMPDIR:-/tmp}/dotfiles-review-test-stubs.XXXXXX")"
+  config_file="$stub_dir/config.local.toml"
   printf '#!/usr/bin/env bash\n[[ "$1" == push ]] && exit 1\n/usr/bin/git "$@"\n' > "$stub_dir/git"
   chmod +x "$stub_dir/git"
+  write_test_config "$config_file"
 
-  PATH="$stub_dir:$PATH" \
-    DOTFILES_AUTOBACKUP_SOURCE_ONLY=true \
-    DOTFILES_REPO_DIR="$REPO_DIR" \
-    source "$SCRIPT_DIR/auto-commit.sh" --test
+  PATH="$stub_dir:$PATH"
+  DOTFILES_AUTOBACKUP_SOURCE_ONLY=true
+  DOTFILES_AUTOBACKUP_CONFIG_FILE="$config_file"
+  DOTFILES_REPO_DIR="$REPO_DIR"
+  export PATH DOTFILES_AUTOBACKUP_SOURCE_ONLY DOTFILES_AUTOBACKUP_CONFIG_FILE DOTFILES_REPO_DIR
+  source "$SCRIPT_DIR/auto-commit.sh" --test
+}
+
+test_missing_local_config_stops_before_backup() {
+  local output exit_code
+
+  set +e
+  output="$(
+    env -i \
+      HOME="$HOME" \
+      PATH="/usr/bin:/bin:/usr/sbin:/sbin" \
+      DOTFILES_AUTOBACKUP_SOURCE_ONLY=true \
+      DOTFILES_AUTOBACKUP_CONFIG_FILE="/tmp/does-not-exist-dotfiles-config.toml" \
+      DOTFILES_REPO_DIR="$REPO_DIR" \
+      /bin/bash -c 'source "$1/auto-commit.sh"' _ "$SCRIPT_DIR" 2>&1
+  )"
+  exit_code=$?
+  set -e
+
+  assert_eq "2" "$exit_code" "missing local config exit"
+  [[ "$output" == *"auto-backup/configure.sh"* ]] ||
+    fail "missing config error does not provide setup command"
+}
+
+test_setup_notification_click_copies_command() {
+  local work_dir args
+  work_dir="$(mktemp -d "${TMPDIR:-/tmp}/dotfiles-notification-test.XXXXXX")"
+
+  terminal-notifier() {
+    printf '%s\n' "$@" > "$work_dir/args"
+  }
+  DOTFILES_AUTOBACKUP_SOURCE_ONLY=false
+  notify_setup_required 2>/dev/null
+  DOTFILES_AUTOBACKUP_SOURCE_ONLY=true
+  unset -f terminal-notifier
+
+  args="$(<"$work_dir/args")"
+  [[ "$args" == *"-execute"* && "$args" == *"/usr/bin/pbcopy"* ]] ||
+    fail "setup notification does not copy its command when clicked"
+  [[ "$args" == *"$SCRIPT_DIR/configure.sh"* ]] ||
+    fail "setup notification click action omitted the configure command"
+  rm -rf "$work_dir"
+}
+
+test_deprecated_reviewer_flag_notifies_and_copies_migration_command() {
+  local work_dir args
+  work_dir="$(mktemp -d "${TMPDIR:-/tmp}/dotfiles-flag-notification-test.XXXXXX")"
+
+  terminal-notifier() {
+    printf '%s\n' "$@" > "$work_dir/args"
+  }
+  DOTFILES_AUTOBACKUP_SOURCE_ONLY=false
+  notify_deprecated_reviewer_flag "--agy" 2>/dev/null
+  DOTFILES_AUTOBACKUP_SOURCE_ONLY=true
+  unset -f terminal-notifier
+
+  args="$(<"$work_dir/args")"
+  [[ "$args" == *"Deprecated reviewer flag: --agy"* ]] ||
+    fail "deprecated reviewer notification omitted the flag"
+  [[ "$args" == *"-execute"* && "$args" == *"/usr/bin/pbcopy"* ]] ||
+    fail "deprecated reviewer notification does not copy migration command"
+  [[ "$args" == *"$SCRIPT_DIR/configure.sh"* ]] ||
+    fail "deprecated reviewer notification omitted configure command"
+  rm -rf "$work_dir"
+}
+
+test_reviewer_flags_are_rejected_with_migration_guidance() {
+  local work_dir config output exit_code
+  work_dir="$(mktemp -d "${TMPDIR:-/tmp}/dotfiles-flag-test.XXXXXX")"
+  config="$work_dir/config.local.toml"
+  write_test_config "$config"
+
+  set +e
+  output="$(
+    env -i \
+      HOME="$HOME" \
+      PATH="/usr/bin:/bin:/usr/sbin:/sbin" \
+      DOTFILES_AUTOBACKUP_SOURCE_ONLY=true \
+      DOTFILES_AUTOBACKUP_CONFIG_FILE="$config" \
+      DOTFILES_REPO_DIR="$REPO_DIR" \
+      /bin/bash -c 'source "$1/auto-commit.sh" --agy' _ "$SCRIPT_DIR" 2>&1
+  )"
+  exit_code=$?
+  set -e
+
+  assert_eq "2" "$exit_code" "retired reviewer flag exit"
+  [[ "$output" == *"reviewer flags were removed"* && "$output" == *"auto-backup/configure.sh"* ]] ||
+    fail "retired reviewer flag does not provide migration guidance"
+  rm -rf "$work_dir"
+}
+
+test_install_requires_valid_local_config_before_side_effects() {
+  local work_dir output exit_code
+  work_dir="$(mktemp -d "${TMPDIR:-/tmp}/dotfiles-install-config-test.XXXXXX")"
+
+  set +e
+  output="$(
+    env -i \
+      HOME="$work_dir/home" \
+      PATH="/usr/bin:/bin:/usr/sbin:/sbin" \
+      DOTFILES_AUTOBACKUP_CONFIG_FILE="$work_dir/missing.toml" \
+      /bin/bash "$SCRIPT_DIR/install.sh" 2>&1
+  )"
+  exit_code=$?
+  set -e
+
+  assert_eq "1" "$exit_code" "install missing config exit"
+  [[ "$output" == *"configure.sh"* ]] ||
+    fail "install missing config error does not provide setup command"
+  [[ ! -e "$work_dir/home/Library" ]] ||
+    fail "install changed LaunchAgent state before validating config"
+
+  rm -rf "$work_dir"
+}
+
+test_install_validates_inherited_opencode_go_key() {
+  local work_dir config validation_file
+  work_dir="$(mktemp -d "${TMPDIR:-/tmp}/dotfiles-install-key-test.XXXXXX")"
+  config="$work_dir/config.local.toml"
+  validation_file="$work_dir/validation"
+
+  cat > "$config" <<'TOML'
+[backup]
+mode = "device-only"
+rebase = true
+
+[review]
+enabled = true
+reviewers = ["opencode-go-api"]
+
+[review.models]
+opencode-go-api = ["opencode-go/deepseek-v4-flash"]
+TOML
+
+  (
+    DOTFILES_AUTOBACKUP_INSTALL_SOURCE_ONLY=true
+    DOTFILES_AUTOBACKUP_CONFIG_FILE="$config"
+    DOTFILES_OPENCODE_GO_ENV_FILE="$work_dir/missing.env"
+    OPENCODE_GO_API_KEY="inherited-test-key"
+    export DOTFILES_AUTOBACKUP_INSTALL_SOURCE_ONLY DOTFILES_AUTOBACKUP_CONFIG_FILE
+    export DOTFILES_OPENCODE_GO_ENV_FILE OPENCODE_GO_API_KEY
+    source "$SCRIPT_DIR/install.sh" > /dev/null
+
+    python3() {
+      if [[ "$1" == "$SCRIPT_DIR/config.py" ]]; then
+        command python3 "$@"
+      elif [[ "$2" == "validate" ]]; then
+        [[ "${OPENCODE_GO_API_KEY:-}" == "inherited-test-key" ]] || return 9
+        [[ "$3" == "opencode-go/deepseek-v4-flash" ]] || return 10
+        printf 'validated\n' > "$validation_file"
+      else
+        return 11
+      fi
+    }
+    validate_machine_config > /dev/null
+  )
+
+  assert_eq "validated" "$(<"$validation_file")" \
+    "install validates inherited OpenCode Go key"
+  rm -rf "$work_dir"
 }
 
 test_preface_approved_is_normalized() {
@@ -145,6 +375,122 @@ test_run_backup_skips_refresh_when_dirty() {
     fail "run-backup does not check local worktree state"
   grep -q 'skipping script refresh before auto-commit can stash them' "$SCRIPT_DIR/run-backup.sh" ||
     fail "run-backup does not skip pre-run script refresh when dirty"
+}
+
+test_noninteractive_runtime_finds_opencode_installer_binary() {
+  local fake_home resolved
+  fake_home="$(mktemp -d "${TMPDIR:-/tmp}/dotfiles-opencode-home.XXXXXX")"
+  mkdir -p "$fake_home/.opencode/bin"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$fake_home/.opencode/bin/opencode"
+  chmod +x "$fake_home/.opencode/bin/opencode"
+  write_test_config "$fake_home/config.local.toml"
+
+  resolved="$(
+    env -i \
+      HOME="$fake_home" \
+      PATH="/usr/bin:/bin:/usr/sbin:/sbin" \
+      DOTFILES_AUTOBACKUP_SOURCE_ONLY=true \
+      DOTFILES_AUTOBACKUP_CONFIG_FILE="$fake_home/config.local.toml" \
+      DOTFILES_REPO_DIR="$REPO_DIR" \
+      /bin/bash -c 'source "$1/auto-commit.sh" --test; command -v opencode' _ "$SCRIPT_DIR"
+  )"
+
+  assert_eq "$fake_home/.opencode/bin/opencode" "$resolved" "noninteractive OpenCode path"
+  grep -Fq '$HOME/.opencode/bin' "$SCRIPT_DIR/run-backup.sh" ||
+    fail "run-backup does not expose the OpenCode installer directory"
+  rm -rf "$fake_home"
+}
+
+test_agy_review_uses_read_only_streaming_interface() {
+  local stub_dir args_file input_file actual_model_file detail_file output old_path
+  stub_dir="$(mktemp -d "${TMPDIR:-/tmp}/dotfiles-agy-stub.XXXXXX")"
+  args_file="$stub_dir/args"
+  input_file="$stub_dir/input"
+  actual_model_file="$stub_dir/model"
+  detail_file="$stub_dir/detail"
+
+  cat > "$stub_dir/agy" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$@" > "$AGY_ARGS_FILE"
+cat > "$AGY_INPUT_FILE"
+printf '%s\n' '{"event":"result","result":{"status":"SUCCESS","response":"APPROVED\n\n### Summary\nClean backup."}}'
+STUB
+  chmod +x "$stub_dir/agy"
+
+  old_path="$PATH"
+  PATH="$stub_dir:$PATH"
+  export AGY_ARGS_FILE="$args_file" AGY_INPUT_FILE="$input_file"
+  output="$(run_agy_review \
+    "gemini-3.7-flash-low" \
+    "Apply the review policy." \
+    "diff --git a/file b/file" \
+    "$REPO_DIR" \
+    "$actual_model_file" \
+    "$detail_file")"
+  PATH="$old_path"
+  unset AGY_ARGS_FILE AGY_INPUT_FILE
+
+  assert_eq "APPROVED
+
+### Summary
+Clean backup." "$output" "AGY review output"
+  assert_eq "gemini-3.7-flash-low" "$(cat "$actual_model_file")" "AGY actual model"
+  grep -Fxq -- "--input-format" "$args_file" || fail "AGY input format flag missing"
+  grep -Fxq -- "stream-json" "$args_file" || fail "AGY stream-json argument missing"
+  grep -Fxq -- "--output-format" "$args_file" || fail "AGY output format flag missing"
+  grep -Fxq -- "--mode" "$args_file" || fail "AGY plan mode flag missing"
+  grep -Fxq -- "plan" "$args_file" || fail "AGY plan mode argument missing"
+  grep -Fxq -- "--sandbox" "$args_file" || fail "AGY sandbox flag missing"
+  grep -Fq "Apply the review policy." "$input_file" || fail "AGY prompt missing from stream input"
+  grep -Fq "diff --git a/file b/file" "$input_file" || fail "AGY diff missing from stream input"
+
+  rm -rf "$stub_dir"
+}
+
+test_opencode_go_api_review_uses_separate_key_and_helper() {
+  local work_dir actual_model_file detail_file output
+  work_dir="$(mktemp -d "${TMPDIR:-/tmp}/dotfiles-opencode-go-test.XXXXXX")"
+  actual_model_file="$work_dir/model"
+  detail_file="$work_dir/detail"
+  OPENCODE_GO_ENV_FILE="$work_dir/.env"
+  unset OPENCODE_GO_API_KEY
+
+  python3() {
+    case "$2" in
+      read-key)
+        printf 'test-api-key\n'
+        ;;
+      review)
+        [[ "${OPENCODE_GO_API_KEY:-}" == "test-api-key" ]] || return 9
+        [[ "$3" == "opencode-go/deepseek-v4-flash" ]] || return 10
+        grep -Fq "Apply the review policy." "$4" || return 11
+        grep -Fq "diff --git a/file b/file" "$4" || return 12
+        printf 'APPROVED\n\n### Summary\nClean backup.\n'
+        ;;
+      *)
+        return 13
+        ;;
+    esac
+  }
+
+  output="$(run_opencode_go_api_review \
+    "opencode-go/deepseek-v4-flash" \
+    "Apply the review policy." \
+    "diff --git a/file b/file" \
+    "$REPO_DIR" \
+    "$actual_model_file" \
+    "$detail_file")"
+  unset -f python3
+
+  assert_eq "APPROVED
+
+### Summary
+Clean backup." "$output" "OpenCode Go API review output"
+  assert_eq "opencode-go/deepseek-v4-flash" "$(<"$actual_model_file")" \
+    "OpenCode Go actual model"
+  [[ ! -s "$detail_file" ]] || fail "OpenCode Go API review leaked diagnostics"
+
+  rm -rf "$work_dir"
 }
 
 test_autobackup_uses_nvm_default_for_npm_backup() {
@@ -333,6 +679,13 @@ FIXTURE
 
 source_helpers
 
+test_toml_config_loader_validates_and_flattens_settings
+test_missing_local_config_stops_before_backup
+test_setup_notification_click_copies_command
+test_deprecated_reviewer_flag_notifies_and_copies_migration_command
+test_reviewer_flags_are_rejected_with_migration_guidance
+test_install_requires_valid_local_config_before_side_effects
+test_install_validates_inherited_opencode_go_key
 test_preface_approved_is_normalized
 test_preface_changes_requested_is_normalized
 test_no_verdict_is_invalid
@@ -343,6 +696,9 @@ test_sanitize_authorization_bearer
 test_sanitize_claude_json_auth_error
 test_auto_commit_stashes_untracked_work
 test_run_backup_skips_refresh_when_dirty
+test_noninteractive_runtime_finds_opencode_installer_binary
+test_agy_review_uses_read_only_streaming_interface
+test_opencode_go_api_review_uses_separate_key_and_helper
 test_autobackup_uses_nvm_default_for_npm_backup
 test_review_prompt_blocks_wholesale_package_backup_deletions
 test_review_pr_falls_back_and_writes_diagnostics

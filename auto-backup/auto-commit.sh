@@ -11,7 +11,7 @@ if [[ -s "$NVM_DIR/nvm.sh" ]]; then
   source "$NVM_DIR/nvm.sh" --no-use
   nvm use --silent default > /dev/null 2>&1 || true
 fi
-export PATH="/usr/local/bin:$HOME/.local/bin:$PATH"
+export PATH="/usr/local/bin:$HOME/.local/bin:$HOME/.opencode/bin:$PATH"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -47,70 +47,112 @@ config_error() {
   exit 2
 }
 
-is_allowed_config_key() {
-  case "$1" in
-    DOTFILES_AUTOBACKUP_MODE|DOTFILES_AUTOBACKUP_REBASE|DOTFILES_AUTOBACKUP_REVIEW|DOTFILES_REVIEWERS|DOTFILES_REVIEW_CLAUDE_MODELS|DOTFILES_REVIEW_CODEX_MODELS|DOTFILES_REVIEW_GEMINI_MODELS|DOTFILES_REVIEW_OPENCODE_MODELS|DOTFILES_REVIEW_CURSOR_MODELS|DOTFILES_REVIEW_OLLAMA_MODELS)
-      return 0
-      ;;
-    *)
-      return 1
-      ;;
-  esac
+shell_single_quote() {
+  local value="$1"
+  value="${value//\'/\'\\\'\'}"
+  printf "'%s'" "$value"
 }
 
-decode_config_value() {
-  local raw_value="$1"
-  local value
+notify_setup_required() {
+  local setup_command="$SCRIPT_DIR/configure.sh"
+  local message="Auto-backup is not configured. Run: $setup_command"
+  local copy_action
 
-  raw_value="$(trim "$raw_value")"
-  if [[ "$raw_value" =~ ^\"([^\"\\]|\\.)*\"([[:space:]]*#.*)?$ ]]; then
-    value="${raw_value%%\"*}"
-    value="${raw_value#\"}"
-    value="${value%\"*}"
-  elif [[ "$raw_value" =~ ^\'[^\']*\'([[:space:]]*#.*)?$ ]]; then
-    value="${raw_value%%\'*}"
-    value="${raw_value#\'}"
-    value="${value%\'*}"
-  else
-    value="$(trim "${raw_value%%#*}")"
+  if [[ "${DOTFILES_AUTOBACKUP_SOURCE_ONLY:-false}" != "true" ]]; then
+    if command -v terminal-notifier &>/dev/null; then
+      copy_action="/usr/bin/printf '%s' $(shell_single_quote "$setup_command") | /usr/bin/pbcopy"
+      terminal-notifier \
+        -title "Dotfiles Backup" \
+        -message "Auto-backup is not configured. Click to copy the setup command." \
+        -subtitle "$setup_command" \
+        -execute "$copy_action" \
+        -sound Basso > /dev/null 2>&1 || true
+    else
+      osascript - "$message" > /dev/null 2>&1 <<'APPLESCRIPT' || true
+on run argv
+  display notification (item 1 of argv) with title "Dotfiles Backup" sound name "Basso"
+end run
+APPLESCRIPT
+    fi
+  fi
+  printf 'auto-commit: %s\n' "$message" >&2
+}
+
+notify_deprecated_reviewer_flag() {
+  local flag="$1"
+  local setup_command="$SCRIPT_DIR/configure.sh"
+  local message="Deprecated reviewer flag: $flag. Run: $setup_command"
+  local copy_action
+
+  if [[ "${DOTFILES_AUTOBACKUP_SOURCE_ONLY:-false}" != "true" ]]; then
+    if command -v terminal-notifier &>/dev/null; then
+      copy_action="/usr/bin/printf '%s' $(shell_single_quote "$setup_command") | /usr/bin/pbcopy"
+      terminal-notifier \
+        -title "Dotfiles Backup" \
+        -message "Deprecated reviewer flag: $flag. Click to copy the migration command." \
+        -subtitle "$setup_command" \
+        -execute "$copy_action" \
+        -sound Basso > /dev/null 2>&1 || true
+    else
+      osascript - "$message" > /dev/null 2>&1 <<'APPLESCRIPT' || true
+on run argv
+  display notification (item 1 of argv) with title "Dotfiles Backup" sound name "Basso"
+end run
+APPLESCRIPT
+    fi
+  fi
+  printf 'auto-commit: %s\n' "$message" >&2
+}
+
+load_toml_config() {
+  local file="$1"
+  local output_file error_file key value detail
+
+  command -v python3 &>/dev/null ||
+    config_error "python3 is required to read auto-backup/config.local.toml"
+  output_file="$(mktemp)"
+  error_file="$(mktemp)"
+  if ! python3 "$SCRIPT_DIR/config.py" "$file" > "$output_file" 2> "$error_file"; then
+    detail="$(<"$error_file")"
+    rm -f "$output_file" "$error_file"
+    config_error "$detail"
   fi
 
-  printf '%s' "$value"
+  while IFS=$'\t' read -r key value; do
+    case "$key" in
+      DOTFILES_AUTOBACKUP_MODE|DOTFILES_AUTOBACKUP_REBASE|DOTFILES_AUTOBACKUP_REVIEW|DOTFILES_REVIEWERS|DOTFILES_REVIEW_CLAUDE_MODELS|DOTFILES_REVIEW_CODEX_MODELS|DOTFILES_REVIEW_AGY_MODELS|DOTFILES_REVIEW_OPENCODE_MODELS|DOTFILES_REVIEW_OPENCODE_GO_API_MODELS|DOTFILES_REVIEW_CURSOR_MODELS|DOTFILES_REVIEW_OLLAMA_MODELS)
+        printf -v "$key" '%s' "$value"
+        ;;
+      *)
+        rm -f "$output_file" "$error_file"
+        config_error "config parser returned unsupported key '$key'"
+        ;;
+    esac
+  done < "$output_file"
+  rm -f "$output_file" "$error_file"
 }
 
-load_config_file() {
-  local file="$1"
-  local line trimmed key raw_value value
-  local line_no=0
+CONFIG_FILE="${DOTFILES_AUTOBACKUP_CONFIG_FILE:-$SCRIPT_DIR/config.local.toml}"
+if [[ ! -f "$CONFIG_FILE" ]]; then
+  notify_setup_required
+  exit 2
+fi
+load_toml_config "$CONFIG_FILE"
 
-  while IFS= read -r line || [[ -n "$line" ]]; do
-    line_no=$((line_no + 1))
-    trimmed="$(trim "$line")"
+OPENCODE_GO_ENV_FILE="${DOTFILES_OPENCODE_GO_ENV_FILE:-$SCRIPT_DIR/.env}"
+validate_opencode_go_secret_file() {
+  local detail
 
-    [[ -z "$trimmed" ]] && continue
-    [[ "${trimmed:0:1}" == "#" ]] && continue
-
-    if [[ "$trimmed" =~ ^([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*=(.*)$ ]]; then
-      key="${BASH_REMATCH[1]}"
-      raw_value="${BASH_REMATCH[2]}"
-
-      is_allowed_config_key "$key" || config_error "$file:$line_no: unsupported key '$key'"
-      value="$(decode_config_value "$raw_value")"
-      printf -v "$key" '%s' "$value"
-    else
-      config_error "$file:$line_no: expected KEY=VALUE assignment"
-    fi
-  done < "$file"
+  [[ -e "$OPENCODE_GO_ENV_FILE" ]] || return 0
+  if [[ "$OPENCODE_GO_ENV_FILE" == "$SCRIPT_DIR/.env" ]] &&
+    git -C "$DOTFILES_REPO_DIR" ls-files --error-unmatch -- "auto-backup/.env" &>/dev/null; then
+    config_error "auto-backup/.env contains a secret and must not be tracked"
+  fi
+  if ! detail="$(python3 "$SCRIPT_DIR/opencode_go.py" read-key "$OPENCODE_GO_ENV_FILE" 2>&1 > /dev/null)"; then
+    config_error "$detail"
+  fi
 }
-
-# Tracked defaults plus optional local overrides.
-if [[ ! -f "$SCRIPT_DIR/config.env" ]]; then
-  config_error "missing auto-backup/config.env; run auto-backup/configure.sh or restore the tracked config"
-fi
-load_config_file "$SCRIPT_DIR/config.env"
-if [[ -f "$SCRIPT_DIR/config.local.env" ]]; then
-  load_config_file "$SCRIPT_DIR/config.local.env"
-fi
+validate_opencode_go_secret_file
 
 DOTFILES_AUTOBACKUP_MODE="${DOTFILES_AUTOBACKUP_MODE:-}"
 DOTFILES_AUTOBACKUP_REBASE="${DOTFILES_AUTOBACKUP_REBASE:-}"
@@ -118,8 +160,9 @@ DOTFILES_AUTOBACKUP_REVIEW="${DOTFILES_AUTOBACKUP_REVIEW:-}"
 DOTFILES_REVIEWERS="${DOTFILES_REVIEWERS:-}"
 DOTFILES_REVIEW_CLAUDE_MODELS="${DOTFILES_REVIEW_CLAUDE_MODELS:-}"
 DOTFILES_REVIEW_CODEX_MODELS="${DOTFILES_REVIEW_CODEX_MODELS:-}"
-DOTFILES_REVIEW_GEMINI_MODELS="${DOTFILES_REVIEW_GEMINI_MODELS:-}"
+DOTFILES_REVIEW_AGY_MODELS="${DOTFILES_REVIEW_AGY_MODELS:-}"
 DOTFILES_REVIEW_OPENCODE_MODELS="${DOTFILES_REVIEW_OPENCODE_MODELS:-}"
+DOTFILES_REVIEW_OPENCODE_GO_API_MODELS="${DOTFILES_REVIEW_OPENCODE_GO_API_MODELS:-}"
 
 # ── Flags ─────────────────────────────────────────────────────────
 # --main-pc    : Full flow — rebase, backup, review, PR, merge
@@ -127,11 +170,9 @@ DOTFILES_REVIEW_OPENCODE_MODELS="${DOTFILES_REVIEW_OPENCODE_MODELS:-}"
 # --no-rebase  : Skip rebase on main (combinable with above)
 # --no-review  : Skip AI review (combinable with above)
 # --test       : Test mode — stay on current branch, push, create PR, review (no backup, no merge)
-# --claude/--codex/--gemini/... : Reviewers to try, in flag order
 MODE_FLAG=""
 REBASE_FLAG=""
 REVIEW_FLAG=""
-REVIEWER_FLAGS=()
 for arg in "$@"; do
   case "$arg" in
     --main-pc) MODE_FLAG="main-pc" ;;
@@ -139,12 +180,11 @@ for arg in "$@"; do
     --no-rebase) REBASE_FLAG="false" ;;
     --no-review) REVIEW_FLAG="false" ;;
     --test) MODE_FLAG="test" ;;
-    --claude) REVIEWER_FLAGS+=("claude") ;;
-    --codex) REVIEWER_FLAGS+=("codex") ;;
-    --gemini) REVIEWER_FLAGS+=("gemini") ;;
-    --opencode) REVIEWER_FLAGS+=("opencode") ;;
-    --cursor) REVIEWER_FLAGS+=("cursor") ;;
-    --ollama) REVIEWER_FLAGS+=("ollama") ;;
+    --claude|--codex|--agy|--gemini|--opencode|--opencode-go-api|--cursor|--ollama)
+      notify_deprecated_reviewer_flag "$arg"
+      config_error "reviewer flags were removed; run auto-backup/configure.sh to select and order reviewers"
+      ;;
+    *) config_error "unknown option '$arg'" ;;
   esac
 done
 
@@ -181,20 +221,13 @@ validate_reviewer_name() {
   local reviewer="$1"
 
   case "$reviewer" in
-    claude|codex|gemini|opencode|cursor|ollama) ;;
-    *) config_error "unknown reviewer '$reviewer' (allowed: claude, codex, gemini, opencode, cursor, ollama)" ;;
+    claude|codex|agy|opencode|opencode-go-api|cursor|ollama) ;;
+    *) config_error "unknown reviewer '$reviewer' (allowed: claude, codex, agy, opencode, opencode-go-api, cursor, ollama)" ;;
   esac
 }
 
 validate_reviewers_config() {
   local reviewer
-
-  if [[ "${#REVIEWER_FLAGS[@]}" -gt 0 ]]; then
-    for reviewer in "${REVIEWER_FLAGS[@]}"; do
-      validate_reviewer_name "$reviewer"
-    done
-    return 0
-  fi
 
   validate_csv_nonempty "DOTFILES_REVIEWERS" "$DOTFILES_REVIEWERS"
   while IFS= read -r reviewer; do
@@ -206,8 +239,9 @@ model_list_name_for_reviewer() {
   case "$1" in
     claude) printf 'DOTFILES_REVIEW_CLAUDE_MODELS' ;;
     codex) printf 'DOTFILES_REVIEW_CODEX_MODELS' ;;
-    gemini) printf 'DOTFILES_REVIEW_GEMINI_MODELS' ;;
+    agy) printf 'DOTFILES_REVIEW_AGY_MODELS' ;;
     opencode) printf 'DOTFILES_REVIEW_OPENCODE_MODELS' ;;
+    opencode-go-api) printf 'DOTFILES_REVIEW_OPENCODE_GO_API_MODELS' ;;
     cursor) printf 'DOTFILES_REVIEW_CURSOR_MODELS' ;;
     ollama) printf 'DOTFILES_REVIEW_OLLAMA_MODELS' ;;
   esac
@@ -217,8 +251,9 @@ model_list_value_for_reviewer() {
   case "$1" in
     claude) printf '%s' "${DOTFILES_REVIEW_CLAUDE_MODELS:-}" ;;
     codex) printf '%s' "${DOTFILES_REVIEW_CODEX_MODELS:-}" ;;
-    gemini) printf '%s' "${DOTFILES_REVIEW_GEMINI_MODELS:-}" ;;
+    agy) printf '%s' "${DOTFILES_REVIEW_AGY_MODELS:-}" ;;
     opencode) printf '%s' "${DOTFILES_REVIEW_OPENCODE_MODELS:-}" ;;
+    opencode-go-api) printf '%s' "${DOTFILES_REVIEW_OPENCODE_GO_API_MODELS:-}" ;;
     cursor) printf '%s' "${DOTFILES_REVIEW_CURSOR_MODELS:-}" ;;
     ollama) printf '%s' "${DOTFILES_REVIEW_OLLAMA_MODELS:-}" ;;
   esac
@@ -226,15 +261,6 @@ model_list_value_for_reviewer() {
 
 validate_selected_model_lists() {
   local reviewer name value
-
-  if [[ "${#REVIEWER_FLAGS[@]}" -gt 0 ]]; then
-    for reviewer in "${REVIEWER_FLAGS[@]}"; do
-      name="$(model_list_name_for_reviewer "$reviewer")"
-      value="$(model_list_value_for_reviewer "$reviewer")"
-      [[ -z "$(trim "$value")" ]] || validate_csv_nonempty "$name" "$value"
-    done
-    return 0
-  fi
 
   while IFS= read -r reviewer; do
     [[ -n "$reviewer" ]] || continue
@@ -340,8 +366,9 @@ reviewer_display_name() {
   case "$1" in
     claude) printf 'Claude' ;;
     codex) printf 'Codex' ;;
-    gemini) printf 'Gemini' ;;
+    agy) printf 'AGY' ;;
     opencode) printf 'OpenCode' ;;
+    opencode-go-api) printf 'OpenCode Go direct API' ;;
     cursor) printf 'Cursor' ;;
     ollama) printf 'Ollama' ;;
     *) printf '%s' "$1" ;;
@@ -352,8 +379,9 @@ reviewer_url() {
   case "$1" in
     claude) printf 'https://claude.com/claude-code' ;;
     codex) printf 'https://developers.openai.com/codex' ;;
-    gemini) printf 'https://github.com/google-gemini/gemini-cli' ;;
+    agy) printf 'https://antigravity.google/docs/cli/overview/' ;;
     opencode) printf 'https://opencode.ai' ;;
+    opencode-go-api) printf 'https://opencode.ai/docs/go/' ;;
     cursor) printf 'https://cursor.com' ;;
     ollama) printf 'https://ollama.com' ;;
   esac
@@ -363,23 +391,15 @@ reviewer_command() {
   case "$1" in
     claude) printf 'claude' ;;
     codex) printf 'codex' ;;
-    gemini) printf 'gemini' ;;
+    agy) printf 'agy' ;;
     opencode) printf 'opencode' ;;
+    opencode-go-api) printf 'python3' ;;
     cursor) printf 'cursor' ;;
     ollama) printf 'ollama' ;;
   esac
 }
 
 configured_reviewers() {
-  local reviewer
-
-  if [[ "${#REVIEWER_FLAGS[@]}" -gt 0 ]]; then
-    for reviewer in "${REVIEWER_FLAGS[@]}"; do
-      printf '%s\n' "$reviewer"
-    done
-    return 0
-  fi
-
   if [[ -n "${DOTFILES_REVIEWERS:-}" ]]; then
     split_csv_lines "$DOTFILES_REVIEWERS"
     return 0
@@ -394,8 +414,9 @@ models_for_reviewer() {
   case "$reviewer" in
     claude) raw="${DOTFILES_REVIEW_CLAUDE_MODELS:-}" ;;
     codex) raw="${DOTFILES_REVIEW_CODEX_MODELS:-}" ;;
-    gemini) raw="${DOTFILES_REVIEW_GEMINI_MODELS:-}" ;;
+    agy) raw="${DOTFILES_REVIEW_AGY_MODELS:-}" ;;
     opencode) raw="${DOTFILES_REVIEW_OPENCODE_MODELS:-}" ;;
+    opencode-go-api) raw="${DOTFILES_REVIEW_OPENCODE_GO_API_MODELS:-}" ;;
     cursor) raw="${DOTFILES_REVIEW_CURSOR_MODELS:-}" ;;
     ollama) raw="${DOTFILES_REVIEW_OLLAMA_MODELS:-}" ;;
   esac
@@ -695,33 +716,34 @@ with open(model_file, "w", encoding="utf-8") as fh:
 PY
 }
 
-parse_gemini_json_review() {
-  local json_file="$1"
+parse_agy_stream_review() {
+  local jsonl_file="$1"
   local review_file="$2"
-  local model_file="$3"
 
-  python3 - "$json_file" "$review_file" "$model_file" <<'PY' 2>/dev/null
+  python3 - "$jsonl_file" "$review_file" <<'PY' 2>/dev/null
 import json
 import sys
 
-json_file, review_file, model_file = sys.argv[1:4]
-with open(json_file, "r", encoding="utf-8") as fh:
-    data = json.load(fh)
+jsonl_file, review_file = sys.argv[1:3]
+result = None
+with open(jsonl_file, "r", encoding="utf-8") as fh:
+    for raw in fh:
+        raw = raw.strip()
+        if not raw:
+            continue
+        event = json.loads(raw)
+        if event.get("event") == "result":
+            result = event.get("result") or {}
 
-response = data.get("response") or ""
-models = ((data.get("stats") or {}).get("models") or {})
-model = ""
-for name, stats in models.items():
-    if "main" in ((stats or {}).get("roles") or {}):
-        model = name
-        break
-if not model and models:
-    model = next(iter(models))
+if not result or result.get("status") != "SUCCESS":
+    raise SystemExit(1)
+
+response = result.get("response") or ""
+if not isinstance(response, str) or not response.strip():
+    raise SystemExit(1)
 
 with open(review_file, "w", encoding="utf-8") as fh:
     fh.write(response)
-with open(model_file, "w", encoding="utf-8") as fh:
-    fh.write(model)
 PY
 }
 
@@ -860,6 +882,36 @@ run_opencode_review() {
   return "$try_exit"
 }
 
+run_opencode_go_api_review() {
+  local model="$1"
+  local prompt="$2"
+  local diff="$3"
+  local _repo_root="$4"
+  local actual_model_file="$5"
+  local detail_file="$6"
+  local api_key="${OPENCODE_GO_API_KEY:-}"
+  local prompt_file try_exit
+
+  command -v python3 &>/dev/null || return 127
+  [[ -f "$SCRIPT_DIR/opencode_go.py" ]] || return 127
+
+  if [[ -z "$api_key" ]]; then
+    if ! api_key="$(python3 "$SCRIPT_DIR/opencode_go.py" read-key "$OPENCODE_GO_ENV_FILE" 2>"$detail_file")"; then
+      return 2
+    fi
+  fi
+
+  prompt_file="$(mktemp)"
+  printf '%s\n\nReview this pull request diff:\n%s\n' "$prompt" "$diff" > "$prompt_file"
+  printf '%s' "$model" > "$actual_model_file"
+  OPENCODE_GO_API_KEY="$api_key" \
+    python3 "$SCRIPT_DIR/opencode_go.py" review "$model" "$prompt_file" \
+      2>"$detail_file"
+  try_exit=$?
+  rm -f "$prompt_file"
+  return "$try_exit"
+}
+
 run_claude_review() {
   local model="$1"
   local prompt="$2"
@@ -936,31 +988,64 @@ run_codex_review() {
   return "$try_exit"
 }
 
-run_gemini_review() {
+run_agy_review() {
   local model="$1"
   local prompt="$2"
   local diff="$3"
-  local actual_model_file="$4"
-  local detail_file="$5"
+  local repo_root="$4"
+  local actual_model_file="$5"
+  local detail_file="$6"
   local try_args=()
-  local tmp_json tmp_review tmp_model tmp_error try_output try_exit
+  local tmp_prompt tmp_input tmp_json tmp_review tmp_error try_output try_exit
 
-  command -v gemini &>/dev/null || return 127
-  [[ "$model" != "default" ]] && try_args=(-m "$model")
+  command -v agy &>/dev/null || return 127
+  if [[ "$model" != "default" ]]; then
+    try_args=(--model "$model")
+    printf '%s' "$model" > "$actual_model_file"
+  fi
 
+  tmp_prompt="$(mktemp)"
+  tmp_input="$(mktemp)"
   tmp_json="$(mktemp)"
   tmp_review="$(mktemp)"
-  tmp_model="$(mktemp)"
   tmp_error="$(mktemp)"
 
-  printf '%s' "$diff" | gemini "${try_args[@]}" -p "$prompt" --output-format json > "$tmp_json" 2>"$tmp_error"
+  {
+    printf '%s\n\n<pull_request_diff>\n' "$prompt"
+    printf '%s\n' "$diff"
+    printf '</pull_request_diff>\n'
+  } > "$tmp_prompt"
+
+  if ! python3 - "$tmp_prompt" "$tmp_input" <<'PY' 2>"$tmp_error"
+import json
+import sys
+
+prompt_file, input_file = sys.argv[1:3]
+with open(prompt_file, "r", encoding="utf-8") as fh:
+    prompt = fh.read()
+event = {"event": "user", "message": {"content": prompt}}
+with open(input_file, "w", encoding="utf-8") as fh:
+    fh.write(json.dumps(event, ensure_ascii=False) + "\n")
+PY
+  then
+    rm -f "$tmp_prompt" "$tmp_input" "$tmp_json" "$tmp_review" "$tmp_error"
+    return 65
+  fi
+
+  (
+    cd "$repo_root" || exit 1
+    agy \
+      --input-format stream-json \
+      --output-format stream-json \
+      --mode plan \
+      --sandbox \
+      "${try_args[@]}" \
+      < "$tmp_input" > "$tmp_json" 2> "$tmp_error"
+  )
   try_exit=$?
 
-  if [[ $try_exit -eq 0 ]] && parse_gemini_json_review "$tmp_json" "$tmp_review" "$tmp_model"; then
+  if [[ $try_exit -eq 0 ]] && parse_agy_stream_review "$tmp_json" "$tmp_review"; then
     try_output="$(cat "$tmp_review" 2>/dev/null)"
-    if [[ -s "$tmp_model" ]]; then
-      cat "$tmp_model" > "$actual_model_file"
-    fi
   else
     { cat "$tmp_error" 2>/dev/null; cat "$tmp_json" 2>/dev/null; } > "$detail_file"
     [[ $try_exit -eq 0 ]] && try_exit=65
@@ -968,7 +1053,7 @@ run_gemini_review() {
   fi
 
   printf '%s' "$try_output"
-  rm -f "$tmp_json" "$tmp_review" "$tmp_model" "$tmp_error"
+  rm -f "$tmp_prompt" "$tmp_input" "$tmp_json" "$tmp_review" "$tmp_error"
   return "$try_exit"
 }
 
@@ -992,8 +1077,9 @@ run_review_attempt() {
   case "$reviewer" in
     claude) run_claude_review "$model" "$prompt" "$diff" "$actual_model_file" "$detail_file" ;;
     codex) run_codex_review "$model" "$prompt" "$diff" "$repo_root" "$actual_model_file" "$detail_file" ;;
-    gemini) run_gemini_review "$model" "$prompt" "$diff" "$actual_model_file" "$detail_file" ;;
+    agy) run_agy_review "$model" "$prompt" "$diff" "$repo_root" "$actual_model_file" "$detail_file" ;;
     opencode) run_opencode_review "$model" "$prompt" "$diff" "$repo_root" "$actual_model_file" "$detail_file" ;;
+    opencode-go-api) run_opencode_go_api_review "$model" "$prompt" "$diff" "$repo_root" "$actual_model_file" "$detail_file" ;;
     cursor|ollama) run_experimental_review "$reviewer" "$detail_file" ;;
     *) return 64 ;;
   esac

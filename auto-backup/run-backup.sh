@@ -21,7 +21,7 @@ if [[ -s "$NVM_DIR/nvm.sh" ]]; then
   source "$NVM_DIR/nvm.sh" --no-use
   nvm use --silent default > /dev/null 2>&1 || true
 fi
-export PATH="/usr/local/bin:$HOME/.local/bin:$PATH"
+export PATH="/usr/local/bin:$HOME/.local/bin:$HOME/.opencode/bin:$PATH"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEFAULT_REPO_DIR="$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel 2>/dev/null || (cd "$SCRIPT_DIR/.." && pwd))"

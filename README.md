@@ -39,7 +39,7 @@ Optional tools used by specific modules:
 - `jq`, `python3`, and `rsync` for config processing/syncing
 - `mas` for Mac App Store app management through Homebrew Bundle
 - `claude` plus an active Claude subscription/login for the default local PR review in the private auto-backup flow
-- `codex` or `gemini` for opt-in local PR review backends
+- `codex` or `agy` for opt-in local PR review backends
 - `code`, `cursor`, and app-specific CLIs for editor backups
 - `npm`, `pnpm`, `pip`, and related language tools for package backups
 
@@ -54,7 +54,7 @@ Optional tools used by specific modules:
 
 Auto-backup flags:
 
-- no flag: use `auto-backup/config.env`
+- no flag: use required `auto-backup/config.local.toml`
 - `--main-pc`: backup, create/reuse PR, run AI review, and squash-merge if approved
 - `--pr-only`: backup, create/reuse PR, and run review without merging
 - `--test`: push/review the current branch without backup or merge
@@ -64,13 +64,13 @@ Auto-backup flags:
 The review/auto-merge path runs `gh pr diff`, pipes that diff into the configured
 reviewer CLIs in order, then writes the review into the PR description. Those CLIs
 must already be installed and authenticated because the script runs unattended from
-Shortcuts or LaunchAgent and cannot complete login prompts. By default the config tries
-Claude first, then Codex, Gemini, and OpenCode as fallbacks; if you choose a different
-provider, authenticate that provider before enabling PR review. Claude, Codex, Gemini,
-and OpenCode are tested adapters; Cursor and Ollama are experimental selectors that
-fail closed. OpenCode runs under its read-only `plan` agent so an unattended review
-cannot edit the repo it is reviewing. If no configured reviewer can produce a usable
-review, the PR stays open for manual review.
+Shortcuts or LaunchAgent and cannot complete login prompts. Claude, Codex, AGY, and
+OpenCode CLI are tested adapters. OpenCode Go direct API is offline-tested and
+validated against the selected account during setup; Cursor and Ollama are
+experimental selectors that fail closed. OpenCode CLI runs under its read-only `plan`
+agent so an unattended review cannot edit the repo. The separate Go API adapter uses
+a Zen API key and documented HTTPS inference endpoints. If no configured reviewer can
+produce a usable review, the PR stays open for manual review.
 
 The shared auto-backup review policy lives in `.github/review-prompt.md`. Repository
 instructions in `AGENTS.md`, its `CLAUDE.md` compatibility symlink, and
@@ -92,11 +92,10 @@ Manual run:
 ./auto-backup/run-backup.sh
 ```
 
-Primary-machine run with PR review and merge is configured through
-`auto-backup/config.env`. For one-off overrides:
+First generate the required ignored machine configuration:
 
 ```bash
-./auto-backup/run-backup.sh --main-pc
+./auto-backup/configure.sh
 ```
 
 Install the LaunchAgent if you want a background schedule:
@@ -118,11 +117,25 @@ Use Apple Shortcuts if you want a visible macOS automation instead:
 ./auto-backup/install-shortcut.sh
 ```
 
-To generate or change local auto-backup overrides interactively:
+The setup command launches a dependency-free Python terminal wizard. It queries the
+models currently available to each selected CLI, shows selection and fallback order
+on one screen, and saves those IDs for deterministic unattended runs. Up/Down
+navigates, Space toggles, Left/Right changes priority, Esc goes back, and Q cancels
+without saving. AGY, OpenCode, and Codex expose model catalogs; Claude Code uses
+stable aliases and manual entry because it has no machine-readable model-list command.
+The separate OpenCode Go direct API fetches its current model catalog from the
+documented models endpoint.
 
-```bash
-./auto-backup/configure.sh
-```
+OpenCode CLI reuses its own provider login. OpenCode Go direct API instead prefers
+`OPENCODE_GO_API_KEY` from the environment or stores it in ignored
+`auto-backup/.env`. That file must have mode `0600`, meaning only its owner can read
+or write it. Setup and LaunchAgent installation validate an existing key and skip the
+prompt when it works. The Go terms use broad language against programmatic output
+extraction despite documenting agent API access; use this only for your own internal
+reviews. Check model privacy terms too—Muse Spark Contributor allows training on
+prompts and outputs. Failed credential checks offer retry, removal of the Go reviewer,
+return to model selection, or complete cancellation; HTTP 403 is reported as a
+possible account, subscription, region, or edge restriction rather than an invalid key.
 
 For non-interactive runners like LaunchAgent or Shortcuts, set at least
 `DOTFILES_REPO_DIR` explicitly if the repo is not in the expected location:
@@ -137,7 +150,9 @@ For PR review/merge modes, authenticate first:
 gh auth login
 claude        # if using Claude
 codex login   # if using Codex
-gemini        # if using Gemini
+agy           # if using Google Antigravity CLI
+opencode      # if using OpenCode CLI
+# OpenCode Go direct API key is handled by configure.sh
 ```
 
 The script creates a device branch like `device/{model}-{serial-suffix}/{username}`,
@@ -181,10 +196,9 @@ defaults to the `origin` remote slug when it can be parsed.
 LaunchAgent and Apple Shortcuts run in a non-interactive environment. If you use
 them, set required environment variables inside the launcher or load them explicitly.
 
-Auto-backup behavior is configured in `auto-backup/config.env`. The public mirror
-ships safe `device-only` defaults; run `auto-backup/configure.sh` to write ignored
-machine-local overrides and opt into PR review/merge behavior. Machine-local overrides belong in ignored
-`auto-backup/config.local.env`.
+Auto-backup behavior is configured in ignored `auto-backup/config.local.toml`.
+The public mirror ships `auto-backup/config.example.toml`, but setup must generate
+the machine-local file before runtime or LaunchAgent installation proceeds.
 
 ## Safety Notes
 

@@ -1,0 +1,12 @@
+# Copying this file is not sufficient for scheduled backups.
+# Run ./auto-backup/configure.sh to discover available reviewers and models.
+
+[backup]
+mode = "device-only"
+rebase = true
+
+[review]
+enabled = false
+reviewers = []
+
+[review.models]

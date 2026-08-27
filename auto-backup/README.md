@@ -56,59 +56,77 @@ before calling `run-backup.sh`.
 
 ## Config
 
-Normal auto-backup behavior is configured in required `auto-backup/config.env`. This
-private repo commits `main-pc` as the default mode there, so Shortcuts can call
-`run-backup.sh` without mode flags. Machine-local overrides can go in ignored
-`auto-backup/config.local.env`.
-
-Precedence:
-
-1. CLI flags for one run
-2. `auto-backup/config.local.env`
-3. `auto-backup/config.env` (required)
-
-Key config values:
-
-```bash
-DOTFILES_AUTOBACKUP_MODE="main-pc"        # device-only | main-pc | pr-only | test
-DOTFILES_AUTOBACKUP_REBASE="true"        # true | false
-DOTFILES_AUTOBACKUP_REVIEW="true"        # true | false
-DOTFILES_REVIEWERS="claude,codex,gemini,opencode" # comma-separated reviewer fallback order
-DOTFILES_REVIEW_CLAUDE_MODELS="default,sonnet,haiku"
-DOTFILES_REVIEW_CODEX_MODELS="default,gpt-5.4,gpt-5.4-mini"
-DOTFILES_REVIEW_GEMINI_MODELS="default,gemini-3-flash-preview,flash"
-```
-
-The script validates mode, booleans, reviewer names, and non-empty model lists before
-it runs backup, commit, PR, or merge work. Model names are passed through to each CLI
-as best-effort strings because model availability changes outside this repo.
-
-To generate a config interactively:
+Normal auto-backup behavior is configured in required, ignored
+`auto-backup/config.local.toml`. There are no tracked machine defaults and no
+reviewer-selection flags. Run setup before installing or running automation:
 
 ```bash
 ./auto-backup/configure.sh
 ```
 
-The setup script uses arrow-key menus. For reviewers, Space selects one or more
-providers, then the script asks for the default reviewer first and fallback reviewers
-after that. Claude, Codex, Gemini, and OpenCode are tested adapters; Cursor and
-Ollama are experimental selectors that fail closed. By default the script writes
-ignored machine-local overrides to `auto-backup/config.local.env` and prints the
-Shortcuts shell snippet to use. Use `./auto-backup/configure.sh --tracked` only when
-you intentionally want to change repo-wide defaults in `auto-backup/config.env`.
+Example:
+
+```toml
+[backup]
+mode = "main-pc"
+rebase = true
+
+[review]
+enabled = true
+reviewers = ["agy", "opencode", "opencode-go-api"]
+
+[review.models]
+agy = ["gemini-3.7-flash-low"]
+opencode = ["opencode/muse-spark-1.2-contributor-free"]
+opencode-go-api = ["opencode-go/deepseek-v4-flash"]
+```
+
+The setup command launches a dependency-free Python terminal wizard. Mode choices
+describe their complete backup/PR/merge behavior. Reviewer and model screens show
+selection and fallback order together: Up/Down navigates, Space toggles, Left/Right
+changes priority, Enter confirms, Esc goes back, and Q cancels without saving.
+Claude, Codex, AGY, OpenCode CLI, and OpenCode Go direct API are tested adapters;
+Cursor and Ollama are experimental selectors that fail closed.
+
+For every selected reviewer, setup loads the models currently exposed by that CLI and
+asks for the primary model followed by any fallbacks. AGY uses `agy models`, OpenCode
+refreshes its provider-aware catalog with `opencode models --refresh`, and Codex uses
+the machine-readable `codex debug models` catalog. Claude Code has no supported
+machine-readable model-list command, so setup offers its stable aliases plus manual
+entry. The Go API fetches `https://opencode.ai/zen/go/v1/models`. Selected IDs are
+persisted; unattended backups do not refresh catalogs or change model order.
+
+OpenCode CLI and OpenCode Go direct API are separate choices. The CLI reuses provider
+credentials configured in OpenCode. The direct adapter sends the PR diff to documented
+Go inference endpoints and needs the API key copied from OpenCode Zen. It prefers an
+inherited `OPENCODE_GO_API_KEY`; otherwise setup validates and saves the key in ignored
+`auto-backup/.env`. That file must have mode `0600`: only its owner can read or write
+it. Installation revalidates the key with a small authenticated inference request.
+The key is never added to the LaunchAgent plist.
+
+Credential failures are classified rather than all being called invalid keys. The
+credential screen always offers retry, remove OpenCode Go and continue, return to
+model selection, or cancel setup. HTTP 403 can indicate account, subscription,
+region, or edge restrictions and is not proof that the entered key is invalid.
+
+Go is documented for internal agent use, but its terms prohibit programmatic output
+extraction in broad language. Use this adapter only for your own internal reviews, not
+for resale, scraping, multi-user proxying, or limit circumvention. Also review each
+model's privacy terms: Muse Spark Contributor permits training on prompts and outputs.
 
 ## Flags
 
 | Flag | Description |
 |---|---|
-| *(none)* | Use `auto-backup/config.env` (`main-pc` in this private repo) |
+| *(none)* | Use required `auto-backup/config.local.toml` |
 | `--main-pc` | Full flow: rebase, backup, review, PR, merge to main |
 | `--pr-only` | Same as `--main-pc` but without merge (review + PR only) |
 | `--test` | Test mode: stay on current dev branch, push, create PR, review (no backup, no merge) |
 | `--no-rebase` | Skip rebase on main. Combinable with any flag above |
 | `--no-review` | Skip AI review. Combinable with any flag above |
-| `--claude`, `--codex`, `--gemini`, `--opencode` | Select AI reviewers in flag order |
-| `--cursor`, `--ollama` | Experimental reviewer selectors; fail closed until enabled/tested |
+
+Reviewer flags were removed. Use `configure.sh` to save reviewer and model fallback
+order. A retired reviewer flag exits with migration guidance.
 
 ### What each step does
 
@@ -122,7 +140,7 @@ you intentionally want to change repo-wide defaults in `auto-backup/config.env`.
 | Squash-merge | Configured | Yes | No | No |
 
 ```bash
-# Configured default from auto-backup/config.env
+# Configured default from auto-backup/config.local.toml
 "$DOTFILES_REPO_DIR/auto-backup/run-backup.sh"
 
 # Override config for one run: full flow with review and merge
@@ -143,8 +161,6 @@ you intentionally want to change repo-wide defaults in `auto-backup/config.env`.
 # PR without review
 "$DOTFILES_REPO_DIR/auto-backup/run-backup.sh" --pr-only --no-review
 
-# Review with Codex first, then Claude fallback
-"$DOTFILES_REPO_DIR/auto-backup/run-backup.sh" --pr-only --codex --claude
 ```
 
 **What `main-pc` mode does:**
@@ -172,10 +188,10 @@ The review is written into the **PR description** with a structured summary incl
 ### Review config
 
 The review prompt lives in `.github/review-prompt.md`. Reviewer and model order lives
-in `auto-backup/config.env`.
+in `auto-backup/config.local.toml`.
 
 - `default` asks the CLI to use its configured/default model.
-- Stable aliases like `sonnet` and `haiku` are preferred for unattended automation.
+- Stable aliases `sonnet`, `fable`, `opus`, and `haiku` are available for unattended automation.
 - Exact model IDs can be configured when you want pinning; if they disappear, the
   script tries the next configured model/reviewer and leaves the PR open if all fail.
 - If a reviewer adds a harmless preface before a single `APPROVED` or
@@ -183,26 +199,15 @@ in `auto-backup/config.env`.
 - Fallback attempts and output repairs are recorded in one sticky PR diagnostics
   comment, which is updated on reruns and removed when no longer needed.
 
-Reviewer order can be set in either flags or environment:
-
-```bash
-# Flags win and preserve order
-"$DOTFILES_REPO_DIR/auto-backup/run-backup.sh" --main-pc --codex --claude
-
-# Or configure local defaults in auto-backup/config.local.env
-DOTFILES_REVIEWERS="codex,claude"
-DOTFILES_REVIEW_CODEX_MODELS="default,gpt-5.4,gpt-5.4-mini"
-DOTFILES_REVIEW_CLAUDE_MODELS="default,sonnet,haiku"
-```
-
 Supported reviewers:
 
 | Reviewer | Status | Command used |
 |---|---|---|
 | Claude | Default, tested | `claude -p` |
 | Codex | Tested | `codex exec --sandbox read-only` |
-| Gemini | Tested | `gemini -o text` |
-| OpenCode | Tested, fallback of last resort | `opencode run --format json --agent plan` |
+| AGY | Tested | `agy --input-format stream-json --output-format stream-json --mode plan --sandbox` |
+| OpenCode CLI | Tested | `opencode run --format json --agent plan` |
+| OpenCode Go direct API | Tested offline; requires Go key | `opencode_go.py` over documented HTTPS endpoints |
 | Cursor | Experimental, untested | Selector exists, but fails closed |
 | Ollama | Experimental, untested | Selector exists, but fails closed |
 
@@ -210,12 +215,13 @@ OpenCode runs under `--agent plan`, its built-in read-only agent, because the
 default `build` agent is configured with `"*": "allow"` and could edit the repo it
 is reviewing. This matches the read-only sandbox used for Codex.
 
-The PR body footer records which reviewer and model produced the review. Claude and
-Gemini use model usage metadata from JSON output. Codex JSON output does not include
-a resolved model field, so `default` is resolved from `~/.codex/config.toml` when
-available; explicit Codex models are recorded directly. OpenCode's run events carry
-no model id either, and it pins no default model in `opencode.json`, so an explicit
-model is recorded as configured and `default` is reported as `default`.
+The PR body footer records which reviewer and model produced the review. Claude uses
+model usage metadata from JSON output. Codex JSON output does not include a resolved
+model field, so `default` is resolved from `~/.codex/config.toml` when available;
+explicit Codex models are recorded directly. AGY and OpenCode run events carry no
+resolved model id, so explicit models are recorded as configured and `default` is
+reported as `default`. The direct Go adapter records its explicit `opencode-go/...`
+model ID.
 
 ### Review flow
 
@@ -272,7 +278,7 @@ shortcuts run "Dotfiles Backup"
 | Flexible schedule | Fixed interval only | Any time/day/condition |
 | Discoverable | Hidden in ~/Library | Visible in Shortcuts.app |
 | Runs without login | Can be configured | No |
-| Supports `main-pc` mode | Configure plist/env | Yes (through `config.env` or `config.local.env`) |
+| Supports `main-pc` mode | Yes, through `config.local.toml` | Yes |
 
 ## Files
 
@@ -280,9 +286,13 @@ shortcuts run "Dotfiles Backup"
 |---|---|
 | `run-backup.sh` | **Entry point** — syncs repo with main, then exec's `auto-commit.sh`. Use this instead of calling `auto-commit.sh` directly |
 | `auto-commit.sh` | Core logic: backup, commit, review, PR, merge. Called by `run-backup.sh` |
-| `config.env` | Tracked defaults for mode, reviewer order, and model fallback |
-| `config.local.env` | Ignored machine-local overrides written by `configure.sh` |
-| `configure.sh` | Interactive config setup that writes `config.local.env` by default and prints automation instructions |
+| `config.local.toml` | Required ignored machine configuration written by `configure.sh` |
+| `config.example.toml` | Public-safe configuration shape example |
+| `.env` | Optional ignored OpenCode Go API key; must be mode `0600` |
+| `config.py` | Strict TOML validator and shell adapter |
+| `configure.py` | Full-screen Python setup wizard |
+| `opencode_go.py` | Dependency-free direct Go API/model/credential adapter |
+| `configure.sh` | Stable shell entry point for `configure.py` |
 | `.github/review-prompt.md` | Review prompt shared by AI review backends (editable) |
 | `install.sh` | Generate and load the LaunchAgent plist (Option A) |
 | `uninstall.sh` | Remove the LaunchAgent (Option A) |
