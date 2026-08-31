@@ -121,6 +121,30 @@ test_missing_local_config_stops_before_backup() {
     fail "missing config error does not provide setup command"
 }
 
+test_notification_self_test_runs_without_backup_config() {
+  local work_dir output exit_code
+  work_dir="$(mktemp -d "${TMPDIR:-/tmp}/dotfiles-notification-cli-test.XXXXXX")"
+
+  set +e
+  output="$(
+    env -i \
+      HOME="$HOME" \
+      PATH="/usr/bin:/bin:/usr/sbin:/sbin" \
+      DOTFILES_AUTOBACKUP_CONFIG_FILE="$work_dir/does-not-exist.toml" \
+      /bin/bash -c \
+        'terminal-notifier() { printf "%s\n" "didGrant:1 hasError:0"; }; source "$1" --test-notification' \
+        _ "$SCRIPT_DIR/auto-commit.sh" 2>&1
+  )"
+  exit_code=$?
+  set -e
+
+  assert_eq "0" "$exit_code" "notification self-test exit"
+  [[ "$output" == *"Test notification sent"* ]] ||
+    fail "notification self-test did not confirm the send attempt"
+
+  rm -rf "$work_dir"
+}
+
 test_setup_notification_click_copies_command() {
   local work_dir args
   work_dir="$(mktemp -d "${TMPDIR:-/tmp}/dotfiles-notification-test.XXXXXX")"
@@ -138,6 +162,65 @@ test_setup_notification_click_copies_command() {
     fail "setup notification does not copy its command when clicked"
   [[ "$args" == *"$SCRIPT_DIR/configure.sh"* ]] ||
     fail "setup notification click action omitted the configure command"
+  rm -rf "$work_dir"
+}
+
+test_notification_denial_falls_back_to_osascript() {
+  local work_dir fallback_file delivery_exit
+  work_dir="$(mktemp -d "${TMPDIR:-/tmp}/dotfiles-notification-fallback-test.XXXXXX")"
+  fallback_file="$work_dir/osascript-called"
+
+  terminal-notifier() {
+    printf '%s\n' 'didGrant:0 hasError:1'
+    return 0
+  }
+
+  osascript() {
+    cat > /dev/null
+    printf '%s\n' called > "$fallback_file"
+  }
+
+  set +e
+  deliver_notification "Backup finished" "" "" 2> "$work_dir/error"
+  delivery_exit=$?
+  set -e
+  unset -f terminal-notifier osascript
+
+  assert_eq "0" "$delivery_exit" "notification fallback exit"
+  assert_eq "called" "$(<"$fallback_file")" "notification fallback invocation"
+  grep -Fq 'terminal-notifier denied notification access' "$work_dir/error" ||
+    fail "notification denial was not reported"
+
+  rm -rf "$work_dir"
+}
+
+test_notification_failure_is_written_to_stderr() {
+  local work_dir delivery_exit
+  work_dir="$(mktemp -d "${TMPDIR:-/tmp}/dotfiles-notification-error-test.XXXXXX")"
+
+  terminal-notifier() {
+    printf '%s\n' 'notification service unavailable'
+    return 1
+  }
+
+  osascript() {
+    cat > /dev/null
+    printf '%s\n' 'notifications are disabled'
+    return 1
+  }
+
+  set +e
+  deliver_notification "Backup finished" "" "" 2> "$work_dir/error"
+  delivery_exit=$?
+  set -e
+  unset -f terminal-notifier osascript
+
+  assert_eq "1" "$delivery_exit" "notification delivery failure exit"
+  grep -Fq 'macOS notification delivery failed' "$work_dir/error" ||
+    fail "notification failure was not written to stderr"
+  grep -Fq -- '--test-notification' "$work_dir/error" ||
+    fail "notification failure did not provide the self-test command"
+
   rm -rf "$work_dir"
 }
 
@@ -336,6 +419,98 @@ test_correct_output_is_unchanged() {
   assert_eq "" "$(cat "$meta")" "no normalization metadata"
 }
 
+test_claude_stream_reports_response_and_auxiliary_models() {
+  local stream review model auxiliary
+  stream="$(mktemp)"
+  review="$(mktemp)"
+  model="$(mktemp)"
+  auxiliary="$(mktemp)"
+
+  cat > "$stream" <<'JSONL'
+{"type":"system","subtype":"init","model":"claude-opus-5"}
+{"type":"assistant","message":{"model":"claude-opus-5","role":"assistant","content":[{"type":"text","text":"APPROVED\n\n### Summary\nClean backup."}]},"parent_tool_use_id":null}
+{"type":"result","subtype":"success","is_error":false,"result":"APPROVED\n\n### Summary\nClean backup.","modelUsage":{"claude-haiku-4-5-20251001":{},"claude-opus-5":{}}}
+JSONL
+
+  parse_claude_stream_review "$stream" "$review" "$model" "$auxiliary"
+
+  assert_eq "APPROVED
+
+### Summary
+Clean backup." "$(<"$review")" "Claude stream review"
+  assert_eq "claude-opus-5" "$(<"$model")" "Claude response model"
+  assert_eq "claude-haiku-4-5-20251001" "$(<"$auxiliary")" \
+    "Claude auxiliary models"
+
+  rm -f "$stream" "$review" "$model" "$auxiliary"
+}
+
+test_claude_stream_empty_result_uses_final_assistant_message() {
+  local stream review model auxiliary
+  stream="$(mktemp)"
+  review="$(mktemp)"
+  model="$(mktemp)"
+  auxiliary="$(mktemp)"
+
+  cat > "$stream" <<'JSONL'
+{"type":"assistant","message":{"model":"claude-opus-5","content":[{"type":"text","text":"I am checking the repository."}]},"parent_tool_use_id":null}
+{"type":"assistant","message":{"model":"claude-opus-5","content":[{"type":"text","text":"APPROVED\n\n### Summary\nClean backup."}]},"parent_tool_use_id":null}
+{"type":"result","subtype":"success","is_error":false,"result":"","modelUsage":{"claude-opus-5":{}}}
+JSONL
+
+  parse_claude_stream_review "$stream" "$review" "$model" "$auxiliary"
+
+  assert_eq "APPROVED
+
+### Summary
+Clean backup." "$(<"$review")" "Claude empty-result fallback"
+
+  rm -f "$stream" "$review" "$model" "$auxiliary"
+}
+
+test_claude_review_uses_stream_response_model() {
+  local work_dir args_file actual_model_file detail_file auxiliary_file output review_exit
+  work_dir="$(mktemp -d "${TMPDIR:-/tmp}/dotfiles-claude-stream-test.XXXXXX")"
+  args_file="$work_dir/args"
+  actual_model_file="$work_dir/model"
+  detail_file="$work_dir/detail"
+  auxiliary_file="$work_dir/auxiliary"
+
+  claude() {
+    printf '%s\n' "$@" > "$args_file"
+    cat > /dev/null
+    cat <<'JSONL'
+{"type":"assistant","message":{"model":"claude-opus-5","content":[{"type":"text","text":"APPROVED\n\n### Summary\nClean backup."}]},"parent_tool_use_id":null}
+{"type":"result","subtype":"success","is_error":false,"result":"APPROVED\n\n### Summary\nClean backup.","modelUsage":{"claude-haiku-4-5-20251001":{},"claude-opus-5":{}}}
+JSONL
+  }
+
+  set +e
+  output="$(run_claude_review \
+    "opus" \
+    "Apply the review policy." \
+    "diff --git a/file b/file" \
+    "$actual_model_file" \
+    "$detail_file" \
+    "$auxiliary_file")"
+  review_exit=$?
+  set -e
+  unset -f claude
+
+  assert_eq "0" "$review_exit" "Claude stream adapter exit"
+  assert_eq "APPROVED
+
+### Summary
+Clean backup." "$output" "Claude stream adapter output"
+  assert_eq "claude-opus-5" "$(<"$actual_model_file")" "Claude stream actual model"
+  assert_eq "claude-haiku-4-5-20251001" "$(<"$auxiliary_file")" \
+    "Claude stream auxiliary model"
+  grep -Fxq -- "stream-json" "$args_file" || fail "Claude stream output format missing"
+  grep -Fxq -- "--verbose" "$args_file" || fail "Claude verbose stream flag missing"
+
+  rm -rf "$work_dir"
+}
+
 test_sanitize_attempt_reason() {
   local raw sanitized
   raw='API_TOKEN=abcdef123456 password: hunter2 Failed to authenticate. API Error: 401 Invalid authentication credentials'
@@ -447,6 +622,35 @@ Clean backup." "$output" "AGY review output"
   rm -rf "$stub_dir"
 }
 
+test_agy_review_preserves_local_input_diagnostic() {
+  local work_dir actual_model_file detail_file review_exit
+  work_dir="$(mktemp -d "${TMPDIR:-/tmp}/dotfiles-agy-input-test.XXXXXX")"
+  actual_model_file="$work_dir/model"
+  detail_file="$work_dir/detail"
+
+  agy() {
+    fail "AGY should not run after local input preparation fails"
+  }
+
+  set +e
+  run_agy_review \
+    "gemini-3.7-flash-low" \
+    "Apply the review policy." \
+    $'diff with invalid byte \xAD' \
+    "$REPO_DIR" \
+    "$actual_model_file" \
+    "$detail_file" > /dev/null
+  review_exit=$?
+  set -e
+  unset -f agy
+
+  assert_eq "78" "$review_exit" "AGY local input failure exit"
+  grep -Fq "can't decode byte 0xad" "$detail_file" ||
+    fail "AGY discarded the local input diagnostic"
+
+  rm -rf "$work_dir"
+}
+
 test_opencode_go_api_review_uses_separate_key_and_helper() {
   local work_dir actual_model_file detail_file output
   work_dir="$(mktemp -d "${TMPDIR:-/tmp}/dotfiles-opencode-go-test.XXXXXX")"
@@ -533,6 +737,108 @@ test_review_prompt_blocks_wholesale_package_backup_deletions() {
     grep -Fq '`CHANGES_REQUESTED`' "$cli_prompt" ||
       fail "$cli_prompt does not require a blocking verdict for package backup loss"
   done
+}
+
+test_review_pr_escapes_invalid_utf8_before_review() {
+  local captured_diff review_exit
+  captured_diff="$(mktemp)"
+
+  gh() {
+    if [[ "$1" == "pr" && "$2" == "diff" ]]; then
+      printf 'diff --git a/history/.zsh_history b/history/.zsh_history\n+bad-byte-\255\n'
+      return 0
+    fi
+    return 1
+  }
+
+  configured_reviewers() {
+    printf '%s\n' claude
+  }
+
+  models_for_reviewer() {
+    printf '%s\n' opus
+  }
+
+  run_review_attempt() {
+    local diff="$4"
+    local actual_model_file="$6"
+    printf '%s' "$diff" > "$captured_diff"
+    printf '%s' 'claude-opus-5' > "$actual_model_file"
+    printf '%s\n' 'APPROVED' '' '### Summary' 'Clean backup.'
+  }
+
+  write_pr_body() { :; }
+  upsert_review_diagnostics_comment() { :; }
+  delete_review_diagnostics_comment() { :; }
+
+  set +e
+  review_pr "267" "https://github.com/example/repo/pull/267"
+  review_exit=$?
+  set -e
+
+  assert_eq "0" "$review_exit" "invalid UTF-8 review exit"
+  iconv -f UTF-8 -t UTF-8 "$captured_diff" > /dev/null 2>&1 ||
+    fail "review adapter received invalid UTF-8"
+  grep -Fq '\xad' "$captured_diff" ||
+    fail "invalid review byte was not preserved as a visible escape"
+
+  rm -f "$captured_diff"
+}
+
+test_review_pr_skips_remaining_models_after_adapter_failure() {
+  local attempts_file review_exit
+  attempts_file="$(mktemp)"
+
+  gh() {
+    if [[ "$1" == "pr" && "$2" == "diff" ]]; then
+      printf '%s\n' 'diff --git a/file b/file'
+      return 0
+    fi
+    return 1
+  }
+
+  configured_reviewers() {
+    printf '%s\n' opencode-go-api claude
+  }
+
+  models_for_reviewer() {
+    case "$1" in
+      opencode-go-api) printf '%s\n' opencode-go/grok-4.6 opencode-go/kimi-k3 ;;
+      claude) printf '%s\n' opus ;;
+    esac
+  }
+
+  run_review_attempt() {
+    local reviewer="$1"
+    local model="$2"
+    local actual_model_file="$6"
+    local detail_file="$7"
+    printf '%s:%s\n' "$reviewer" "$model" >> "$attempts_file"
+
+    if [[ "$reviewer" == "opencode-go-api" ]]; then
+      printf '%s' 'local adapter configuration failed' > "$detail_file"
+      return 78
+    fi
+
+    printf '%s' 'claude-opus-5' > "$actual_model_file"
+    printf '%s\n' 'APPROVED' '' '### Summary' 'Clean backup.'
+  }
+
+  write_pr_body() { :; }
+  upsert_review_diagnostics_comment() { :; }
+  delete_review_diagnostics_comment() { :; }
+
+  set +e
+  review_pr "267" "https://github.com/example/repo/pull/267"
+  review_exit=$?
+  set -e
+
+  assert_eq "0" "$review_exit" "adapter failure fallback exit"
+  assert_eq "opencode-go-api:opencode-go/grok-4.6
+claude:opus" "$(<"$attempts_file")" \
+    "adapter failure should skip remaining models"
+
+  rm -f "$attempts_file"
 }
 
 test_review_pr_falls_back_and_writes_diagnostics() {
@@ -677,11 +983,57 @@ FIXTURE
   assert_eq "true" "$DELETE_DIAGNOSTICS_CALLED" "clean success should delete stale diagnostics"
 }
 
+test_review_pr_reports_auxiliary_models_separately() {
+  LAST_PR_BODY=""
+
+  gh() {
+    if [[ "$1" == "pr" && "$2" == "diff" ]]; then
+      printf '%s\n' 'diff --git a/file b/file'
+      return 0
+    fi
+    return 1
+  }
+
+  configured_reviewers() {
+    printf '%s\n' claude
+  }
+
+  models_for_reviewer() {
+    printf '%s\n' opus
+  }
+
+  run_review_attempt() {
+    local actual_model_file="$6"
+    local auxiliary_models_file="${8:-}"
+    printf '%s' 'claude-opus-5' > "$actual_model_file"
+    [[ -n "$auxiliary_models_file" ]] &&
+      printf '%s' 'claude-haiku-4-5-20251001' > "$auxiliary_models_file"
+    printf '%s\n' 'APPROVED' '' '### Summary' 'Clean backup.'
+  }
+
+  write_pr_body() {
+    LAST_PR_BODY="$2"
+  }
+
+  upsert_review_diagnostics_comment() { :; }
+  delete_review_diagnostics_comment() { :; }
+
+  review_pr "267" "https://github.com/example/repo/pull/267"
+
+  [[ "$LAST_PR_BODY" == *'Reviewed by **Claude** (model: `claude-opus-5`, configured: `opus`)'* ]] ||
+    fail "Claude response model footer missing"
+  [[ "$LAST_PR_BODY" == *'Auxiliary models: `claude-haiku-4-5-20251001`'* ]] ||
+    fail "Claude auxiliary model footer missing"
+}
+
 source_helpers
 
 test_toml_config_loader_validates_and_flattens_settings
 test_missing_local_config_stops_before_backup
+test_notification_self_test_runs_without_backup_config
 test_setup_notification_click_copies_command
+test_notification_denial_falls_back_to_osascript
+test_notification_failure_is_written_to_stderr
 test_deprecated_reviewer_flag_notifies_and_copies_migration_command
 test_reviewer_flags_are_rejected_with_migration_guidance
 test_install_requires_valid_local_config_before_side_effects
@@ -691,6 +1043,9 @@ test_preface_changes_requested_is_normalized
 test_no_verdict_is_invalid
 test_multiple_verdicts_are_invalid
 test_correct_output_is_unchanged
+test_claude_stream_reports_response_and_auxiliary_models
+test_claude_stream_empty_result_uses_final_assistant_message
+test_claude_review_uses_stream_response_model
 test_sanitize_attempt_reason
 test_sanitize_authorization_bearer
 test_sanitize_claude_json_auth_error
@@ -698,10 +1053,14 @@ test_auto_commit_stashes_untracked_work
 test_run_backup_skips_refresh_when_dirty
 test_noninteractive_runtime_finds_opencode_installer_binary
 test_agy_review_uses_read_only_streaming_interface
+test_agy_review_preserves_local_input_diagnostic
 test_opencode_go_api_review_uses_separate_key_and_helper
 test_autobackup_uses_nvm_default_for_npm_backup
 test_review_prompt_blocks_wholesale_package_backup_deletions
+test_review_pr_escapes_invalid_utf8_before_review
+test_review_pr_skips_remaining_models_after_adapter_failure
 test_review_pr_falls_back_and_writes_diagnostics
 test_review_pr_deletes_stale_diagnostics_on_clean_success
+test_review_pr_reports_auxiliary_models_separately
 
 printf 'ok - auto-review helper tests passed\n'

@@ -14,6 +14,16 @@ brew install terminal-notifier
 
 Without it, notifications fall back to `osascript` (no click-to-open).
 
+Test notification delivery without running a backup or loading machine config:
+
+```bash
+./auto-backup/auto-commit.sh --test-notification
+```
+
+If no notification appears, enable notifications for `terminal-notifier` or
+`osascript` in System Settings. Runtime delivery errors are also written to the
+auto-backup log instead of being discarded.
+
 ## Device branches
 
 Each device gets its own branch, auto-detected from hardware:

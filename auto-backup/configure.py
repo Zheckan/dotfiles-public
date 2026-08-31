@@ -216,15 +216,15 @@ def discover_models(reviewer: str, api_key: str = "") -> tuple[list[Choice], str
         if reviewer == "claude":
             return (
                 [
-                    Choice("default", "Configured default", "Use the CLI's current default."),
-                    Choice("sonnet", "Sonnet stable alias", "Account-aware stable alias."),
                     Choice(
                         "fable",
                         "Fable stable alias",
                         "Claude Fable for complex and long-running tasks.",
                     ),
                     Choice("opus", "Opus stable alias", "Most capable stable alias."),
+                    Choice("sonnet", "Sonnet stable alias", "Account-aware stable alias."),
                     Choice("haiku", "Haiku stable alias", "Fast stable alias."),
+                    Choice("default", "Configured default", "Use the CLI's current default."),
                 ],
                 "Claude Code has no machine-readable model catalog; stable aliases are shown.",
             )
