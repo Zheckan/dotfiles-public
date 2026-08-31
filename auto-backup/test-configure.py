@@ -24,10 +24,12 @@ class ConfigureWizardTests(unittest.TestCase):
         self.assertIn("Leave the PR open", descriptions["pr-only"])
         self.assertIn("without running backup", descriptions["test"])
 
-    def test_claude_discovery_includes_all_stable_aliases(self) -> None:
+    def test_claude_discovery_orders_stable_aliases_before_default(self) -> None:
         choices, _ = configure.discover_models("claude")
-        aliases = {choice.value for choice in choices}
-        self.assertTrue({"sonnet", "fable", "opus", "haiku"}.issubset(aliases))
+        self.assertEqual(
+            [choice.value for choice in choices],
+            ["fable", "opus", "sonnet", "haiku", "default"],
+        )
 
     def test_selection_and_order_are_one_state(self) -> None:
         selected: list[str] = []

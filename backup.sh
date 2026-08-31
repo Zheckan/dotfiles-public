@@ -35,7 +35,6 @@ run_backup "Editors — VS Code"     "$DOTFILES_DIR/apps/editors/vscode/backup.s
 run_backup "Editors — Zed"         "$DOTFILES_DIR/apps/editors/zed/backup.sh"
 run_backup "AI Tools — Claude"     "$DOTFILES_DIR/apps/ai-tools/claude/backup.sh"
 run_backup "AI Tools — Codex"      "$DOTFILES_DIR/apps/ai-tools/codex/backup.sh"
-run_backup "AI Tools — Gemini"     "$DOTFILES_DIR/apps/ai-tools/gemini/backup.sh"
 run_backup "AI Tools — Antigravity" "$DOTFILES_DIR/apps/ai-tools/antigravity/backup.sh"
 run_backup "AI Tools — OpenCode"   "$DOTFILES_DIR/apps/ai-tools/opencode/backup.sh"
 run_backup "AI Tools — Agent Skills" "$DOTFILES_DIR/apps/ai-tools/agents/backup.sh"

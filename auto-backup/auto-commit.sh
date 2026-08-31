@@ -53,6 +53,91 @@ shell_single_quote() {
   printf "'%s'" "$value"
 }
 
+run_terminal_notifier() {
+  local output status
+
+  if output="$(terminal-notifier "$@" 2>&1)"; then
+    status=0
+  else
+    status=$?
+  fi
+
+  if [[ "$output" == *"didGrant:0"* || "$output" == *"hasError:1"* ]]; then
+    printf 'auto-commit: terminal-notifier denied notification access\n' >&2
+    return 1
+  fi
+  if [[ $status -ne 0 ]]; then
+    output="$(printf '%s' "$output" | tr '\n' ' ' | cut -c1-240)"
+    printf 'auto-commit: terminal-notifier failed (exit=%s): %s\n' "$status" "$output" >&2
+    return 1
+  fi
+
+  return 0
+}
+
+run_osascript_notification() {
+  local message="$1"
+  local sound="${2:-}"
+  local output status
+
+  command -v osascript &>/dev/null || return 127
+  if output="$(osascript - "$message" "$sound" 2>&1 <<'APPLESCRIPT'
+on run argv
+  set notificationMessage to item 1 of argv
+  set notificationSound to item 2 of argv
+  if notificationSound is "" then
+    display notification notificationMessage with title "Dotfiles Backup"
+  else
+    display notification notificationMessage with title "Dotfiles Backup" sound name notificationSound
+  end if
+end run
+APPLESCRIPT
+  )"; then
+    return 0
+  else
+    status=$?
+  fi
+
+  output="$(printf '%s' "$output" | tr '\n' ' ' | cut -c1-240)"
+  printf 'auto-commit: osascript notification failed (exit=%s): %s\n' "$status" "$output" >&2
+  return "$status"
+}
+
+deliver_notification() {
+  local message="$1"
+  local url="${2:-}"
+  local sound="${3:-}"
+  local args=(-title "Dotfiles Backup" -message "$message")
+
+  [[ -n "$url" ]] && args+=(-open "$url")
+  [[ -n "$sound" ]] && args+=(-sound "$sound")
+
+  if command -v terminal-notifier &>/dev/null; then
+    run_terminal_notifier "${args[@]}" && return 0
+  fi
+  run_osascript_notification "$message" "$sound" && return 0
+
+  printf 'auto-commit: macOS notification delivery failed; run %s --test-notification\n' "$SCRIPT_DIR/auto-commit.sh" >&2
+  return 1
+}
+
+test_notification_delivery() {
+  local message="Dotfiles backup test notification"
+
+  if deliver_notification "$message" "" "Glass"; then
+    printf 'Test notification sent. If it did not appear, enable notifications for terminal-notifier or osascript in System Settings.\n'
+    return 0
+  fi
+
+  printf 'Test notification failed. Enable notifications for terminal-notifier or osascript in System Settings.\n' >&2
+  return 1
+}
+
+if [[ "$#" -eq 1 && "$1" == "--test-notification" ]]; then
+  test_notification_delivery
+  exit $?
+fi
+
 notify_setup_required() {
   local setup_command="$SCRIPT_DIR/configure.sh"
   local message="Auto-backup is not configured. Run: $setup_command"
@@ -61,18 +146,15 @@ notify_setup_required() {
   if [[ "${DOTFILES_AUTOBACKUP_SOURCE_ONLY:-false}" != "true" ]]; then
     if command -v terminal-notifier &>/dev/null; then
       copy_action="/usr/bin/printf '%s' $(shell_single_quote "$setup_command") | /usr/bin/pbcopy"
-      terminal-notifier \
+      run_terminal_notifier \
         -title "Dotfiles Backup" \
         -message "Auto-backup is not configured. Click to copy the setup command." \
         -subtitle "$setup_command" \
         -execute "$copy_action" \
-        -sound Basso > /dev/null 2>&1 || true
+        -sound Basso ||
+        run_osascript_notification "$message" "Basso" || true
     else
-      osascript - "$message" > /dev/null 2>&1 <<'APPLESCRIPT' || true
-on run argv
-  display notification (item 1 of argv) with title "Dotfiles Backup" sound name "Basso"
-end run
-APPLESCRIPT
+      run_osascript_notification "$message" "Basso" || true
     fi
   fi
   printf 'auto-commit: %s\n' "$message" >&2
@@ -87,18 +169,15 @@ notify_deprecated_reviewer_flag() {
   if [[ "${DOTFILES_AUTOBACKUP_SOURCE_ONLY:-false}" != "true" ]]; then
     if command -v terminal-notifier &>/dev/null; then
       copy_action="/usr/bin/printf '%s' $(shell_single_quote "$setup_command") | /usr/bin/pbcopy"
-      terminal-notifier \
+      run_terminal_notifier \
         -title "Dotfiles Backup" \
         -message "Deprecated reviewer flag: $flag. Click to copy the migration command." \
         -subtitle "$setup_command" \
         -execute "$copy_action" \
-        -sound Basso > /dev/null 2>&1 || true
+        -sound Basso ||
+        run_osascript_notification "$message" "Basso" || true
     else
-      osascript - "$message" > /dev/null 2>&1 <<'APPLESCRIPT' || true
-on run argv
-  display notification (item 1 of argv) with title "Dotfiles Backup" sound name "Basso"
-end run
-APPLESCRIPT
+      run_osascript_notification "$message" "Basso" || true
     fi
   fi
   printf 'auto-commit: %s\n' "$message" >&2
@@ -170,6 +249,7 @@ DOTFILES_REVIEW_OPENCODE_GO_API_MODELS="${DOTFILES_REVIEW_OPENCODE_GO_API_MODELS
 # --no-rebase  : Skip rebase on main (combinable with above)
 # --no-review  : Skip AI review (combinable with above)
 # --test       : Test mode — stay on current branch, push, create PR, review (no backup, no merge)
+# --test-notification: Send one notification without loading backup config
 MODE_FLAG=""
 REBASE_FLAG=""
 REVIEW_FLAG=""
@@ -339,29 +419,21 @@ github_url() {
 # Usage: notify_success "message" ["url"]
 notify_error() {
   local msg="$1" url="${2:-}"
-  if command -v terminal-notifier &>/dev/null; then
-    local args=(-title "Dotfiles Backup" -message "$msg" -sound Basso)
-    [[ -n "$url" ]] && args+=(-open "$url")
-    terminal-notifier "${args[@]}" > /dev/null 2>&1 || true
-  else
-    osascript -e "display notification \"$msg\" with title \"Dotfiles Backup\" sound name \"Basso\"" 2>/dev/null || true
-  fi
+  deliver_notification "$msg" "$url" "Basso" || true
   echo "✗ $msg" >&2
 }
 
 notify_success() {
   local msg="$1" url="${2:-}"
-  if command -v terminal-notifier &>/dev/null; then
-    local args=(-title "Dotfiles Backup" -message "$msg")
-    [[ -n "$url" ]] && args+=(-open "$url")
-    terminal-notifier "${args[@]}" > /dev/null 2>&1 || true
-  else
-    osascript -e "display notification \"$msg\" with title \"Dotfiles Backup\"" 2>/dev/null || true
-  fi
+  deliver_notification "$msg" "$url" "" || true
 }
 
 # ── PR Review (AI reviewer adapters) ─────────────────────────────
 # Reviews the PR diff before allowing merge. Returns 0 if approved, 1 otherwise.
+# Exit 78 marks a deterministic local adapter failure. Trying another model in
+# the same adapter cannot fix it, so review_pr moves to the next reviewer.
+REVIEW_EXIT_NONRETRYABLE=78
+
 reviewer_display_name() {
   case "$1" in
     claude) printf 'Claude' ;;
@@ -573,6 +645,16 @@ with open(meta_file, "w", encoding="utf-8") as fh:
 PY
 }
 
+normalize_review_input() {
+  python3 -c '
+import sys
+
+raw = sys.stdin.buffer.read()
+text = raw.decode("utf-8", errors="backslashreplace")
+sys.stdout.buffer.write(text.encode("utf-8"))
+'
+}
+
 write_pr_body() {
   local pr_number="$1"
   local body="$2"
@@ -656,6 +738,7 @@ build_review_diagnostics_body() {
   local final_actual_model="$3"
   local diagnostics_text="$4"
   local normalizations_text="$5"
+  local auxiliary_models="${6:-}"
   local body marker item fallback_reason_text
 
   marker="$(review_diagnostics_marker)"
@@ -663,6 +746,11 @@ build_review_diagnostics_body() {
 ### Auto-review fallback diagnostics
 
 Final reviewer: $final_reviewer (model: \`$final_actual_model\`, configured: \`$final_model\`)"
+
+  if [[ -n "$auxiliary_models" ]]; then
+    body="$body
+Auxiliary models: \`$auxiliary_models\`"
+  fi
 
   if [[ -n "$diagnostics_text" ]]; then
     fallback_reason_text="$(format_review_fallback_reason "$diagnostics_text")"
@@ -690,29 +778,69 @@ Output normalization:"
   printf '%s' "$body"
 }
 
-parse_claude_json_review() {
-  local json_file="$1"
+parse_claude_stream_review() {
+  local stream_file="$1"
   local review_file="$2"
   local model_file="$3"
+  local auxiliary_models_file="$4"
 
-  python3 - "$json_file" "$review_file" "$model_file" <<'PY' 2>/dev/null
+  python3 - "$stream_file" "$review_file" "$model_file" "$auxiliary_models_file" <<'PY'
 import json
 import re
 import sys
 
-json_file, review_file, model_file = sys.argv[1:4]
-with open(json_file, "r", encoding="utf-8") as fh:
-    data = json.load(fh)
+stream_file, review_file, model_file, auxiliary_models_file = sys.argv[1:5]
+result = ""
+assistant_text = []
+response_model = ""
+used_models = []
 
-result = data.get("result") or ""
-model_usage = data.get("modelUsage") or {}
-model = next(iter(model_usage), "")
-model = re.sub(r"\[[^\]]+\]$", "", model)
+with open(stream_file, "r", encoding="utf-8") as fh:
+    for line_number, raw_line in enumerate(fh, 1):
+        if not raw_line.strip():
+            continue
+        try:
+            data = json.loads(raw_line)
+        except json.JSONDecodeError as error:
+            raise ValueError(f"invalid Claude stream event on line {line_number}: {error}") from error
+
+        if data.get("type") == "assistant" and data.get("parent_tool_use_id") is None:
+            message = data.get("message") or {}
+            model = message.get("model") or ""
+            model = re.sub(r"\[[^\]]+\]$", "", model)
+            if model and model != "<synthetic>" and not data.get("isApiErrorMessage"):
+                response_model = model
+            current_text = []
+            for block in message.get("content") or []:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    text = block.get("text")
+                    if isinstance(text, str) and text:
+                        current_text.append(text)
+            if current_text:
+                assistant_text = current_text
+
+        if data.get("type") == "result":
+            candidate = data.get("result")
+            if isinstance(candidate, str) and candidate:
+                result = candidate
+            model_usage = data.get("modelUsage") or {}
+            if isinstance(model_usage, dict):
+                for model in model_usage:
+                    normalized = re.sub(r"\[[^\]]+\]$", "", model)
+                    if normalized and normalized not in used_models:
+                        used_models.append(normalized)
+
+if not result:
+    result = "\n".join(assistant_text)
+
+auxiliary_models = [model for model in used_models if model != response_model]
 
 with open(review_file, "w", encoding="utf-8") as fh:
     fh.write(result)
 with open(model_file, "w", encoding="utf-8") as fh:
-    fh.write(model)
+    fh.write(response_model)
+with open(auxiliary_models_file, "w", encoding="utf-8") as fh:
+    fh.write(", ".join(auxiliary_models))
 PY
 }
 
@@ -897,7 +1025,7 @@ run_opencode_go_api_review() {
 
   if [[ -z "$api_key" ]]; then
     if ! api_key="$(python3 "$SCRIPT_DIR/opencode_go.py" read-key "$OPENCODE_GO_ENV_FILE" 2>"$detail_file")"; then
-      return 2
+      return "$REVIEW_EXIT_NONRETRYABLE"
     fi
   fi
 
@@ -918,33 +1046,39 @@ run_claude_review() {
   local diff="$3"
   local actual_model_file="$4"
   local detail_file="$5"
+  local auxiliary_models_file="${6:-}"
   local try_args=()
-  local tmp_json tmp_review tmp_model tmp_error try_output try_exit
+  local tmp_stream tmp_review tmp_model tmp_auxiliary tmp_error try_output try_exit
 
   command -v claude &>/dev/null || return 127
   [[ "$model" != "default" ]] && try_args=(--model "$model")
 
-  tmp_json="$(mktemp)"
+  tmp_stream="$(mktemp)"
   tmp_review="$(mktemp)"
   tmp_model="$(mktemp)"
+  tmp_auxiliary="$(mktemp)"
   tmp_error="$(mktemp)"
 
-  try_output=$(printf '%s' "$diff" | claude -p "${try_args[@]}" --output-format json "$prompt" > "$tmp_json" 2>"$tmp_error")
+  try_output=$(printf '%s' "$diff" | claude -p "${try_args[@]}" --output-format stream-json --verbose "$prompt" > "$tmp_stream" 2>"$tmp_error")
   try_exit=$?
 
-  if [[ $try_exit -eq 0 ]] && parse_claude_json_review "$tmp_json" "$tmp_review" "$tmp_model"; then
+  if [[ $try_exit -eq 0 ]] \
+    && parse_claude_stream_review "$tmp_stream" "$tmp_review" "$tmp_model" "$tmp_auxiliary" 2>>"$tmp_error"; then
     try_output="$(cat "$tmp_review" 2>/dev/null)"
     if [[ -s "$tmp_model" ]]; then
       cat "$tmp_model" > "$actual_model_file"
     fi
+    if [[ -n "$auxiliary_models_file" && -s "$tmp_auxiliary" ]]; then
+      cat "$tmp_auxiliary" > "$auxiliary_models_file"
+    fi
   else
-    { cat "$tmp_error" 2>/dev/null; cat "$tmp_json" 2>/dev/null; } > "$detail_file"
+    { cat "$tmp_error" 2>/dev/null; cat "$tmp_stream" 2>/dev/null; } > "$detail_file"
     [[ $try_exit -eq 0 ]] && try_exit=65
     try_output=""
   fi
 
   printf '%s' "$try_output"
-  rm -f "$tmp_json" "$tmp_review" "$tmp_model" "$tmp_error"
+  rm -f "$tmp_stream" "$tmp_review" "$tmp_model" "$tmp_auxiliary" "$tmp_error"
   return "$try_exit"
 }
 
@@ -1028,8 +1162,9 @@ with open(input_file, "w", encoding="utf-8") as fh:
     fh.write(json.dumps(event, ensure_ascii=False) + "\n")
 PY
   then
+    cat "$tmp_error" > "$detail_file" 2>/dev/null || true
     rm -f "$tmp_prompt" "$tmp_input" "$tmp_json" "$tmp_review" "$tmp_error"
-    return 65
+    return "$REVIEW_EXIT_NONRETRYABLE"
   fi
 
   (
@@ -1073,9 +1208,10 @@ run_review_attempt() {
   local repo_root="$5"
   local actual_model_file="$6"
   local detail_file="$7"
+  local auxiliary_models_file="${8:-}"
 
   case "$reviewer" in
-    claude) run_claude_review "$model" "$prompt" "$diff" "$actual_model_file" "$detail_file" ;;
+    claude) run_claude_review "$model" "$prompt" "$diff" "$actual_model_file" "$detail_file" "$auxiliary_models_file" ;;
     codex) run_codex_review "$model" "$prompt" "$diff" "$repo_root" "$actual_model_file" "$detail_file" ;;
     agy) run_agy_review "$model" "$prompt" "$diff" "$repo_root" "$actual_model_file" "$detail_file" ;;
     opencode) run_opencode_review "$model" "$prompt" "$diff" "$repo_root" "$actual_model_file" "$detail_file" ;;
@@ -1088,7 +1224,7 @@ run_review_attempt() {
 review_pr() {
   local pr_number="$1"
   local pr_url="$2"
-  local diff repo_root prompt_file prompt
+  local raw_diff diff repo_root prompt_file raw_prompt prompt
   local reviewers=()
   local models=()
   local attempts=()
@@ -1096,13 +1232,19 @@ review_pr() {
   local normalizations=()
   local reviewer model review try_output try_exit verdict
   local reviewer_name reviewer_link footer actual_model actual_model_file detail_file
+  local auxiliary_models auxiliary_models_file
   local raw_detail detail normalized_review_file normalization_file normalization_detail
   local diagnostics_body
 
-  diff=$(gh pr diff "$pr_number" 2>/dev/null)
-  if [[ -z "$diff" ]]; then
+  raw_diff=$(gh pr diff "$pr_number" 2>/dev/null)
+  if [[ -z "$raw_diff" ]]; then
     write_pr_body "$pr_number" "**Auto-review failed**: could not retrieve PR diff."
     notify_error "Failed to get PR diff — PR #$pr_number left open" "$pr_url"
+    return 1
+  fi
+  if ! diff="$(printf '%s' "$raw_diff" | normalize_review_input)"; then
+    write_pr_body "$pr_number" "**Auto-review failed**: could not prepare the PR diff as UTF-8 text."
+    notify_error "Failed to prepare review input — PR #$pr_number left open" "$pr_url"
     return 1
   fi
 
@@ -1114,7 +1256,12 @@ review_pr() {
     return 1
   fi
 
-  prompt=$(cat "$prompt_file")
+  raw_prompt=$(cat "$prompt_file")
+  if ! prompt="$(printf '%s' "$raw_prompt" | normalize_review_input)"; then
+    write_pr_body "$pr_number" "**Auto-review failed**: could not prepare the review policy as UTF-8 text."
+    notify_error "Failed to prepare review policy — PR #$pr_number left open" "$pr_url"
+    return 1
+  fi
 
   while IFS= read -r reviewer; do
     [[ -n "$reviewer" ]] && reviewers+=("$reviewer")
@@ -1135,8 +1282,9 @@ review_pr() {
       reviewer_name="$(reviewer_display_name "$reviewer")"
       actual_model_file="$(mktemp)"
       detail_file="$(mktemp)"
+      auxiliary_models_file="$(mktemp)"
       echo "  ↳ reviewing with $reviewer_name (model: $model)..." >&2
-      try_output="$(run_review_attempt "$reviewer" "$model" "$prompt" "$diff" "$repo_root" "$actual_model_file" "$detail_file")"
+      try_output="$(run_review_attempt "$reviewer" "$model" "$prompt" "$diff" "$repo_root" "$actual_model_file" "$detail_file" "$auxiliary_models_file")"
       try_exit=$?
 
       if [[ $try_exit -eq 0 && -n "$try_output" ]]; then
@@ -1149,7 +1297,7 @@ review_pr() {
           [[ -n "$normalization_detail" ]] || normalization_detail="invalid verdict format"
           attempts+=("$reviewer_name ($model): invalid review output ($normalization_detail)")
           diagnostics+=("$reviewer_name (\`$model\`): invalid review output, $normalization_detail")
-          rm -f "$actual_model_file" "$detail_file" "$normalized_review_file" "$normalized_review_file.raw" "$normalization_file"
+          rm -f "$actual_model_file" "$detail_file" "$auxiliary_models_file" "$normalized_review_file" "$normalized_review_file.raw" "$normalization_file"
           echo "  ↳ $reviewer_name ($model) returned invalid review output, trying next reviewer/model..." >&2
           continue
         fi
@@ -1164,6 +1312,7 @@ review_pr() {
         verdict="$(printf '%s\n' "$review" | first_review_line)"
         reviewer_link="$(reviewer_url "$reviewer")"
         actual_model="$(cat "$actual_model_file" 2>/dev/null)"
+        auxiliary_models="$(cat "$auxiliary_models_file" 2>/dev/null)"
         [[ -n "$actual_model" ]] || actual_model="$model"
         if [[ "$actual_model" != "$model" ]]; then
           footer="> Reviewed by **$reviewer_name** (model: \`$actual_model\`, configured: \`$model\`)"
@@ -1171,7 +1320,11 @@ review_pr() {
           footer="> Reviewed by **$reviewer_name** (model: \`$model\`)"
         fi
         [[ -n "$reviewer_link" ]] && footer="$footer via [$reviewer_name]($reviewer_link)"
-        rm -f "$actual_model_file" "$detail_file"
+        if [[ -n "$auxiliary_models" ]]; then
+          footer="$footer
+> Auxiliary models: \`$auxiliary_models\`"
+        fi
+        rm -f "$actual_model_file" "$detail_file" "$auxiliary_models_file"
 
         write_pr_body "$pr_number" "$review
 
@@ -1184,7 +1337,8 @@ $footer"
             "$model" \
             "$actual_model" \
             "$(lines_from_array "${diagnostics[@]}")" \
-            "$(lines_from_array "${normalizations[@]}")")"
+            "$(lines_from_array "${normalizations[@]}")" \
+            "$auxiliary_models")"
           upsert_review_diagnostics_comment "$pr_number" "$diagnostics_body"
         else
           delete_review_diagnostics_comment "$pr_number"
@@ -1212,7 +1366,11 @@ $footer"
         attempts+=("$reviewer_name ($model): $(printf '%s\n' "$try_output" | first_review_line), exit=$try_exit, $detail")
         diagnostics+=("$reviewer_name (\`$model\`): failed, exit=$try_exit, $detail")
       fi
-      rm -f "$actual_model_file" "$detail_file"
+      rm -f "$actual_model_file" "$detail_file" "$auxiliary_models_file"
+      if [[ $try_exit -eq $REVIEW_EXIT_NONRETRYABLE || $try_exit -eq 127 ]]; then
+        echo "  ↳ $reviewer_name is unavailable for this run (exit=$try_exit), skipping its remaining models..." >&2
+        break
+      fi
       echo "  ↳ $reviewer_name ($model) failed (exit=$try_exit), trying next reviewer/model..." >&2
     done
   done
@@ -1436,7 +1594,6 @@ echo "$CHANGED_FILES" | grep -q "^apps/editors/vscode/" && SUMMARY="$SUMMARY, VS
 echo "$CHANGED_FILES" | grep -q "^apps/editors/zed/" && SUMMARY="$SUMMARY, Zed"
 echo "$CHANGED_FILES" | grep -q "^apps/ai-tools/claude/" && SUMMARY="$SUMMARY, Claude"
 echo "$CHANGED_FILES" | grep -q "^apps/ai-tools/codex/" && SUMMARY="$SUMMARY, Codex"
-echo "$CHANGED_FILES" | grep -q "^apps/ai-tools/gemini/" && SUMMARY="$SUMMARY, Gemini"
 echo "$CHANGED_FILES" | grep -q "^apps/ai-tools/antigravity/" && SUMMARY="$SUMMARY, Antigravity"
 echo "$CHANGED_FILES" | grep -q "^apps/ai-tools/opencode/" && SUMMARY="$SUMMARY, OpenCode"
 echo "$CHANGED_FILES" | grep -q "^apps/ai-tools/agents/" && SUMMARY="$SUMMARY, Agent Skills"
