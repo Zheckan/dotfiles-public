@@ -75,6 +75,41 @@ class OpenCodeGoTests(unittest.TestCase):
         self.assertEqual(
             sent_request.get_header("User-agent"), "dotfiles-auto-backup/1.0"
         )
+        self.assertTrue(sent_request.get_header("X-opencode-session"))
+
+    def test_every_request_carries_one_stable_session_id(self) -> None:
+        opencode_go.session_id.cache_clear()
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop(opencode_go.SESSION_ENV_KEY, None)
+            first = opencode_go.build_request(
+                "deepseek-v4-flash", "review this", "secret-key", 4096
+            ).get_header("X-opencode-session")
+            second = opencode_go.build_request(
+                "minimax-m3", "review this", "secret-key", 4096
+            ).get_header("X-opencode-session")
+            with mock.patch.object(opencode_go, "api_request", return_value={
+                "data": [{"id": "deepseek-v4-flash"}]
+            }) as request:
+                opencode_go.list_models("secret-key")
+            catalog = request.call_args.args[0].get_header("X-opencode-session")
+
+        self.assertTrue(first)
+        self.assertEqual(first, second)
+        self.assertEqual(first, catalog)
+
+    def test_session_id_can_be_pinned_by_the_caller(self) -> None:
+        opencode_go.session_id.cache_clear()
+        self.addCleanup(opencode_go.session_id.cache_clear)
+        with mock.patch.dict(
+            os.environ, {opencode_go.SESSION_ENV_KEY: "  pinned-session  "}
+        ):
+            self.assertEqual(opencode_go.session_id(), "pinned-session")
+
+    def test_blank_pinned_session_id_falls_back_to_a_generated_one(self) -> None:
+        opencode_go.session_id.cache_clear()
+        self.addCleanup(opencode_go.session_id.cache_clear)
+        with mock.patch.dict(os.environ, {opencode_go.SESSION_ENV_KEY: "   "}):
+            self.assertTrue(opencode_go.session_id().strip())
 
     def test_extracts_text_from_all_documented_protocols(self) -> None:
         fixtures = (

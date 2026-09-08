@@ -28,6 +28,45 @@ get_brewfile_mas_names() {
   sed -nE 's/^mas "([^"]+)".*/\1/p' "$BREWFILE" | sort -u
 }
 
+# ── Guard against whole-section wipeouts ─────────────────────────────
+# `brew bundle dump` enumerates each section by shelling out to an external tool
+# (npm, code, mas, go, ...). When one of those is missing or broken on PATH the
+# dump emits zero entries for that section instead of failing, which silently
+# commits a wholesale deletion. That is destructive: apps/install.sh runs
+# `brew bundle`, so restoring from the emptied Brewfile uninstalls nothing but
+# leaves every package the section held unrecoverable from the repo.
+# Fail closed — keep the previous entries and warn loudly.
+GUARDED_SECTIONS=(tap brew cask mas vscode npm go cargo uv krew)
+
+count_brewfile_entries() {
+  local keyword="$1" file="$2"
+  [[ -f "$file" ]] || { printf "0"; return 0; }
+  grep -cE "^${keyword} \"" "$file" || true
+}
+
+# Restore any section that was non-empty before the dump and is empty after it.
+restore_wiped_brewfile_sections() {
+  local prev_file="$1" new_file="$2"
+  local keyword prev_count new_count
+
+  [[ -f "$prev_file" ]] || return 0
+
+  for keyword in "${GUARDED_SECTIONS[@]}"; do
+    prev_count=$(count_brewfile_entries "$keyword" "$prev_file")
+    new_count=$(count_brewfile_entries "$keyword" "$new_file")
+    [[ "$prev_count" -gt 0 && "$new_count" -eq 0 ]] || continue
+
+    grep -E "^${keyword} \"" "$prev_file" >> "$new_file"
+    log_warn "Restored $prev_count '$keyword' entr(ies) the dump returned empty — is the '$keyword' tool on PATH?"
+    log_warn "  If you really removed them all, edit $new_file by hand."
+  done
+}
+
+# Allow tests to source the helpers above without running a backup.
+if [[ "${DOTFILES_APPS_BACKUP_SOURCE_ONLY:-false}" == "true" ]]; then
+  return 0 2>/dev/null || exit 0
+fi
+
 # Resolve names of currently installed brew cask apps.
 resolve_installed_cask_labels() {
   brew info --json=v2 --installed --cask 2>/dev/null | /usr/bin/ruby -rjson -e '
@@ -228,9 +267,18 @@ insert_casks_into_brewfile() {
 # Save previous cask list to detect dropped casks after dump + scan
 mapfile -t PREV_CASKS < <(get_brewfile_casks)
 
+# Keep the pre-dump Brewfile so wiped-out sections can be restored (see below).
+PREV_BREWFILE=$(mktemp -t dotfiles-brewfile-prev)
+trap 'rm -f "$PREV_BREWFILE"' EXIT
+if [[ -f "$BREWFILE" ]]; then
+  cp "$BREWFILE" "$PREV_BREWFILE"
+fi
+
 log_info "Dumping Homebrew packages to $BREWFILE..."
 brew bundle dump --force --file="$BREWFILE"
 log_info "Brewfile updated at $BREWFILE"
+
+restore_wiped_brewfile_sections "$PREV_BREWFILE" "$BREWFILE"
 
 # ── Detect untracked apps ───────────────────────────────────────────
 log_info "Scanning for untracked applications..."

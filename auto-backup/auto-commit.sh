@@ -2,8 +2,13 @@
 # Auto-commit script — called by LaunchAgent or Apple Shortcut
 # Sets up PATH for non-interactive environments (Shortcuts, launchd)
 
-# Load Homebrew and user PATH
+# Load Homebrew and user PATH.
+# Extra PATH entries go on FIRST so that `nvm use default` below can still put
+# the default node/npm ahead of them. Other node installs may drop shims in
+# ~/.local/bin; if those win, `npm ls -g` reports an empty global prefix and
+# `brew bundle dump` silently wipes every npm entry from apps/Brewfile.
 eval "$(/opt/homebrew/bin/brew shellenv 2>/dev/null)" || true
+export PATH="/usr/local/bin:$HOME/.local/bin:$HOME/.opencode/bin:$PATH"
 NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
 if [[ -s "$NVM_DIR/nvm.sh" ]]; then
   export NVM_DIR
@@ -11,7 +16,6 @@ if [[ -s "$NVM_DIR/nvm.sh" ]]; then
   source "$NVM_DIR/nvm.sh" --no-use
   nvm use --silent default > /dev/null 2>&1 || true
 fi
-export PATH="/usr/local/bin:$HOME/.local/bin:$HOME/.opencode/bin:$PATH"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -78,7 +82,15 @@ run_terminal_notifier() {
 run_osascript_notification() {
   local message="$1"
   local sound="${2:-}"
+  local url="${3:-}"
   local output status
+
+  # AppleScript's `display notification` has no click action, so a URL can only
+  # be carried as text. Without this the fallback loses the PR link entirely and
+  # clicking the notification just activates whatever app macOS blames for the
+  # script (Finder, when launched from Shortcuts).
+  [[ -n "$url" ]] && message="$message
+$url"
 
   command -v osascript &>/dev/null || return 127
   if output="$(osascript - "$message" "$sound" 2>&1 <<'APPLESCRIPT'
@@ -114,8 +126,11 @@ deliver_notification() {
 
   if command -v terminal-notifier &>/dev/null; then
     run_terminal_notifier "${args[@]}" && return 0
+    # terminal-notifier is the only clickable path; log the link before falling
+    # back so it is never lost to a notification-permission failure.
+    [[ -n "$url" ]] && printf 'auto-commit: notification link: %s\n' "$url" >&2
   fi
-  run_osascript_notification "$message" "$sound" && return 0
+  run_osascript_notification "$message" "$sound" "$url" && return 0
 
   printf 'auto-commit: macOS notification delivery failed; run %s --test-notification\n' "$SCRIPT_DIR/auto-commit.sh" >&2
   return 1

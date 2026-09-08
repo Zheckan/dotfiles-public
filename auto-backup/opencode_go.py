@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import functools
 import json
 import os
 import re
@@ -10,6 +11,7 @@ import stat
 import sys
 import urllib.error
 import urllib.request
+import uuid
 from pathlib import Path
 from typing import NoReturn
 
@@ -19,7 +21,25 @@ MODEL_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]*$")
 ENV_KEY = "OPENCODE_GO_API_KEY"
 # OpenCode's edge returns HTTP 403 to urllib's default Python-urllib user agent.
 USER_AGENT = "dotfiles-auto-backup/1.0"
+# OpenCode Go requires a stable session ID per conversation on every request.
+SESSION_HEADER = "x-opencode-session"
+SESSION_ENV_KEY = "OPENCODE_GO_SESSION_ID"
 VALIDATION_MAX_TOKENS = 16
+
+
+@functools.lru_cache(maxsize=1)
+def session_id() -> str:
+    """One stable session ID for every request this process makes.
+
+    Each adapter run is a single-turn conversation, so a per-process ID is the
+    right granularity. Callers that span several runs over one conversation can
+    pin the ID through OPENCODE_GO_SESSION_ID.
+    """
+    return os.environ.get(SESSION_ENV_KEY, "").strip() or uuid.uuid4().hex
+
+
+def default_headers() -> dict[str, str]:
+    return {"User-Agent": USER_AGENT, SESSION_HEADER: session_id()}
 
 
 class AdapterError(RuntimeError):
@@ -71,7 +91,7 @@ def build_request(
 ) -> urllib.request.Request:
     model = normalize_model(model)
     protocol = protocol_for_model(model)
-    headers = {"Content-Type": "application/json", "User-Agent": USER_AGENT}
+    headers = {"Content-Type": "application/json", **default_headers()}
 
     if protocol == "responses":
         endpoint = "responses"
@@ -185,7 +205,7 @@ def api_request(request: urllib.request.Request, *, timeout: int) -> object:
 
 
 def list_models(api_key: str = "") -> list[str]:
-    headers = {"Accept": "application/json", "User-Agent": USER_AGENT}
+    headers = {"Accept": "application/json", **default_headers()}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
     request = urllib.request.Request(f"{BASE_URL}/models", headers=headers)
