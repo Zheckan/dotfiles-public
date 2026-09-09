@@ -89,22 +89,55 @@ reviewers = ["agy", "opencode", "opencode-go-api"]
 agy = ["gemini-3.7-flash-low"]
 opencode = ["opencode/muse-spark-1.2-contributor-free"]
 opencode-go-api = ["opencode-go/deepseek-v4-flash"]
+
+[review.reasoning.opencode]
+"opencode/muse-spark-1.2-contributor-free" = "high"
+
+[review.reasoning.opencode-go-api]
+"opencode-go/deepseek-v4-flash" = "max"
 ```
 
 The setup command launches a dependency-free Python terminal wizard. Mode choices
 describe their complete backup/PR/merge behavior. Reviewer and model screens show
 selection and fallback order together: Up/Down navigates, Space toggles, Left/Right
-changes priority, Enter confirms, Esc goes back, and Q cancels without saving.
+changes priority, and R cycles the highlighted selected model's available reasoning
+controls. Enter confirms, Esc goes back, and Q cancels without saving.
 Claude, Codex, AGY, OpenCode CLI, and OpenCode Go direct API are tested adapters;
 Cursor and Ollama are experimental selectors that fail closed.
 
 For every selected reviewer, setup loads the models currently exposed by that CLI and
 asks for the primary model followed by any fallbacks. AGY uses `agy models`, OpenCode
-refreshes its provider-aware catalog with `opencode models --refresh`, and Codex uses
-the machine-readable `codex debug models` catalog. Claude Code has no supported
+refreshes its provider-aware catalog with `opencode models --refresh --verbose`, and
+Codex uses the machine-readable `codex debug models` catalog. Claude Code has no supported
 machine-readable model-list command, so setup offers its stable aliases plus manual
-entry. The Go API fetches `https://opencode.ai/zen/go/v1/models`. Selected IDs are
-persisted; unattended backups do not refresh catalogs or change model order.
+entry. The Go API fetches `https://opencode.ai/zen/go/v1/models`; when OpenCode CLI
+is installed, its verbose Go-provider catalog supplies the corresponding reasoning
+variants. Selected IDs are persisted; unattended backups do not refresh catalogs or
+change model order.
+
+On the Claude, Codex, OpenCode CLI, and OpenCode Go model screens, a selected model
+with configurable reasoning shows its current value in brackets. Press R to change
+it in place. Choices come from that model's catalog entry rather than a reviewer-wide
+list. Claude's stable aliases use Claude Code's documented capability table: Haiku
+has `off`/`on`, while effort-capable aliases expose only their supported levels.
+`default` preserves the CLI or provider behavior already in effect.
+
+Existing configs do not need to be reset or regenerated. A config without
+`[review.reasoning]` automatically inherits `default` for every configured model.
+Supported explicit values remain pinned. If the earlier reviewer-wide Claude picker
+saved an effort that the selected stable alias does not support, it is safely treated
+as `default`; rerun setup only if you want to choose an explicit supported value.
+
+Claude effort values are passed through `claude --effort`; Haiku's toggle uses the
+documented thinking setting or `CLAUDE_CODE_DISABLE_THINKING`. Codex uses its
+`model_reasoning_effort` override. OpenCode CLI uses the selected catalog variant.
+The direct Go adapter translates the same OpenCode Go effort name to the documented
+Responses, Chat Completions, or Messages request shape.
+
+AGY model IDs already include their effort variant, such as
+`gemini-3.8-flash-high`, so setup does not add a second reasoning selector for AGY.
+OpenCode variants are provider- and model-specific. If a selected variant is not
+supported, that attempt fails and the normal model/reviewer fallback continues.
 
 OpenCode CLI and OpenCode Go direct API are separate choices. The CLI reuses provider
 credentials configured in OpenCode. The direct adapter sends the PR diff to documented
@@ -201,6 +234,9 @@ The review prompt lives in `.github/review-prompt.md`. Reviewer and model order 
 in `auto-backup/config.local.toml`.
 
 - `default` asks the CLI to use its configured/default model.
+- A per-model reasoning value of `default` inherits the CLI or provider default.
+- Claude, Codex, OpenCode CLI, and OpenCode Go reasoning can be pinned per fallback model in
+  `[review.reasoning.<reviewer>]`.
 - Stable aliases `sonnet`, `fable`, `opus`, and `haiku` are available for unattended automation.
 - Exact model IDs can be configured when you want pinning; if they disappear, the
   script tries the next configured model/reviewer and leaves the PR open if all fail.
@@ -213,11 +249,11 @@ Supported reviewers:
 
 | Reviewer | Status | Command used |
 |---|---|---|
-| Claude | Default, tested | `claude -p` |
-| Codex | Tested | `codex exec --sandbox read-only` |
+| Claude | Default, tested | `claude -p --effort LEVEL` or Haiku thinking toggle |
+| Codex | Tested | `codex exec --sandbox read-only -c model_reasoning_effort=LEVEL` |
 | AGY | Tested | `agy --input-format stream-json --output-format stream-json --mode plan --sandbox` |
-| OpenCode CLI | Tested | `opencode run --format json --agent plan` |
-| OpenCode Go direct API | Tested offline; requires Go key | `opencode_go.py` over documented HTTPS endpoints |
+| OpenCode CLI | Tested | `opencode run --format json --agent plan --variant LEVEL` |
+| OpenCode Go direct API | Tested offline; requires Go key | `opencode_go.py` with protocol-specific reasoning over documented HTTPS endpoints |
 | Cursor | Experimental, untested | Selector exists, but fails closed |
 | Ollama | Experimental, untested | Selector exists, but fails closed |
 
@@ -231,7 +267,8 @@ model field, so `default` is resolved from `~/.codex/config.toml` when available
 explicit Codex models are recorded directly. AGY and OpenCode run events carry no
 resolved model id, so explicit models are recorded as configured and `default` is
 reported as `default`. The direct Go adapter records its explicit `opencode-go/...`
-model ID.
+model ID. The footer also records the configured reasoning value, including
+`default` when the adapter inherits its existing setting.
 
 ### Review flow
 

@@ -66,6 +66,60 @@ class OpenCodeGoTests(unittest.TestCase):
         self.assertEqual(request.get_header("X-api-key"), "secret-key")
         self.assertEqual(request.get_header("Anthropic-version"), "2023-06-01")
 
+    def test_reasoning_is_translated_for_each_direct_api_protocol(self) -> None:
+        fixtures = (
+            (
+                "gpt-5.6-luna",
+                "high",
+                {"reasoning": {"effort": "high"}},
+            ),
+            (
+                "deepseek-v4-flash",
+                "max",
+                {"reasoning_effort": "max"},
+            ),
+            (
+                "qwen3.8-max",
+                "xhigh",
+                {"output_config": {"effort": "xhigh"}},
+            ),
+            (
+                "minimax-m3",
+                "thinking",
+                {"thinking": {"type": "adaptive"}},
+            ),
+            (
+                "minimax-m3",
+                "none",
+                {"thinking": {"type": "disabled"}},
+            ),
+        )
+        for model, reasoning, expected in fixtures:
+            with self.subTest(model=model):
+                request = opencode_go.build_request(
+                    model,
+                    "review this",
+                    "secret-key",
+                    4096,
+                    reasoning=reasoning,
+                )
+                payload = json.loads(request.data)
+                for key, value in expected.items():
+                    self.assertEqual(payload[key], value)
+
+    def test_default_reasoning_adds_no_request_override(self) -> None:
+        request = opencode_go.build_request(
+            "gpt-5.6-luna",
+            "review this",
+            "secret-key",
+            4096,
+            reasoning="default",
+        )
+        payload = json.loads(request.data)
+        self.assertNotIn("reasoning", payload)
+        self.assertNotIn("reasoning_effort", payload)
+        self.assertNotIn("output_config", payload)
+
     def test_model_catalog_uses_non_blocked_user_agent(self) -> None:
         with mock.patch.object(opencode_go, "api_request", return_value={
             "data": [{"id": "deepseek-v4-flash"}]

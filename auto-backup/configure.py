@@ -42,6 +42,7 @@ class Choice:
     label: str
     description: str
     experimental: bool = False
+    reasoning_levels: tuple[str, ...] = ()
 
 
 @dataclass
@@ -51,6 +52,7 @@ class SetupState:
     review: bool = False
     reviewers: list[str] = field(default_factory=list)
     models: dict[str, list[str]] = field(default_factory=dict)
+    reasoning: dict[str, dict[str, str]] = field(default_factory=dict)
     pending_go_key: str | None = None
     go_key_source: str = ""
 
@@ -127,6 +129,45 @@ BOOLEAN_CHOICES = [
     Choice("true", "Yes", ""),
     Choice("false", "No", ""),
 ]
+
+REASONING_REVIEWERS = {"claude", "codex", "opencode", "opencode-go-api"}
+CLAUDE_ALIAS_REASONING = {
+    "fable": ("low", "medium", "high", "xhigh", "max"),
+    "opus": ("low", "medium", "high", "xhigh", "max"),
+    "sonnet": ("low", "medium", "high", "max"),
+    "haiku": ("off", "on"),
+}
+LEGACY_CLAUDE_EFFORTS = {"low", "medium", "high", "xhigh", "max"}
+
+
+def normalize_configured_reasoning(reviewer: str, model: str, level: str) -> str:
+    """Keep configs written by the former reviewer-wide Claude picker usable."""
+    if reviewer != "claude" or level not in LEGACY_CLAUDE_EFFORTS:
+        return level
+    supported = {"default", *CLAUDE_ALIAS_REASONING.get(model, ())}
+    if model in CLAUDE_ALIAS_REASONING or model == "default":
+        return level if level in supported else "default"
+    return level
+
+
+def reasoning_choices(levels: tuple[str, ...]) -> list[Choice]:
+    if not levels:
+        return []
+    return [
+        Choice(
+            "default",
+            "Configured default",
+            "Inherit the CLI, model, or provider default used today.",
+        ),
+        *[
+            Choice(
+                level,
+                level,
+                f"Pass {level!r} explicitly for this model attempt.",
+            )
+            for level in levels
+        ],
+    ]
 
 
 def toggle_selection(selected: list[str], value: str) -> list[str]:
@@ -211,6 +252,38 @@ def choices_from_lines(output: str) -> list[Choice]:
     return choices
 
 
+def opencode_choices_from_verbose(output: str) -> list[Choice]:
+    """Parse `opencode models --verbose` without guessing model variants."""
+    decoder = json.JSONDecoder()
+    choices: list[Choice] = []
+    model_line = re.compile(
+        r"(?m)^([A-Za-z0-9][A-Za-z0-9._/-]*/[A-Za-z0-9._/-]+)\n"
+    )
+    for match in model_line.finditer(output):
+        try:
+            metadata, _ = decoder.raw_decode(output, match.end())
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(metadata, dict):
+            continue
+        variants = metadata.get("variants", {})
+        levels = (
+            tuple(level for level in variants if isinstance(level, str))
+            if isinstance(variants, dict)
+            else ()
+        )
+        model = match.group(1)
+        choices.append(
+            Choice(
+                model,
+                model,
+                model,
+                reasoning_levels=levels,
+            )
+        )
+    return choices
+
+
 def discover_models(reviewer: str, api_key: str = "") -> tuple[list[Choice], str]:
     try:
         if reviewer == "claude":
@@ -220,11 +293,31 @@ def discover_models(reviewer: str, api_key: str = "") -> tuple[list[Choice], str
                         "fable",
                         "Fable stable alias",
                         "Claude Fable for complex and long-running tasks.",
+                        reasoning_levels=CLAUDE_ALIAS_REASONING["fable"],
                     ),
-                    Choice("opus", "Opus stable alias", "Most capable stable alias."),
-                    Choice("sonnet", "Sonnet stable alias", "Account-aware stable alias."),
-                    Choice("haiku", "Haiku stable alias", "Fast stable alias."),
-                    Choice("default", "Configured default", "Use the CLI's current default."),
+                    Choice(
+                        "opus",
+                        "Opus stable alias",
+                        "Most capable stable alias.",
+                        reasoning_levels=CLAUDE_ALIAS_REASONING["opus"],
+                    ),
+                    Choice(
+                        "sonnet",
+                        "Sonnet stable alias",
+                        "Account-aware stable alias.",
+                        reasoning_levels=CLAUDE_ALIAS_REASONING["sonnet"],
+                    ),
+                    Choice(
+                        "haiku",
+                        "Haiku stable alias",
+                        "Fast stable alias. Reasoning is an on/off thinking toggle.",
+                        reasoning_levels=CLAUDE_ALIAS_REASONING["haiku"],
+                    ),
+                    Choice(
+                        "default",
+                        "Configured default",
+                        "Use the CLI's current default.",
+                    ),
                 ],
                 "Claude Code has no machine-readable model catalog; stable aliases are shown.",
             )
@@ -232,34 +325,96 @@ def discover_models(reviewer: str, api_key: str = "") -> tuple[list[Choice], str
             output = run_command(["agy", "models"])
             choices = choices_from_lines(output)
         elif reviewer == "opencode":
-            output = run_command(["opencode", "models", "--refresh"])
-            choices = [
-                Choice(line.strip(), line.strip(), line.strip())
-                for line in output.splitlines()
-                if "/" in line and not line.isspace()
-            ]
+            output = run_command(
+                ["opencode", "models", "--refresh", "--verbose"]
+            )
+            choices = opencode_choices_from_verbose(output)
         elif reviewer == "codex":
             payload = json.loads(run_command(["codex", "debug", "models"]))
-            choices = [
-                Choice(model["slug"], model.get("display_name") or model["slug"], model["slug"])
-                for model in payload.get("models", [])
-                if isinstance(model, dict) and isinstance(model.get("slug"), str)
-            ]
+            choices = []
+            for model in payload.get("models", []):
+                if not isinstance(model, dict) or not isinstance(
+                    model.get("slug"), str
+                ):
+                    continue
+                levels = tuple(
+                    entry["effort"]
+                    for entry in model.get("supported_reasoning_levels", [])
+                    if isinstance(entry, dict)
+                    and isinstance(entry.get("effort"), str)
+                )
+                choices.append(
+                    Choice(
+                        model["slug"],
+                        model.get("display_name") or model["slug"],
+                        model["slug"],
+                        reasoning_levels=levels,
+                    )
+                )
         elif reviewer == "opencode-go-api":
-            choices = [
-                Choice(model, model.removeprefix("opencode-go/"), model)
-                for model in opencode_go.list_models(api_key)
-            ]
-            return choices, "Live catalog loaded from the OpenCode Go API."
+            models = opencode_go.list_models(api_key)
+            catalog: dict[str, Choice] = {}
+            variants_note = (
+                " OpenCode CLI is unavailable, so reasoning stays at provider default."
+            )
+            try:
+                output = run_command(
+                    [
+                        "opencode",
+                        "models",
+                        "opencode-go",
+                        "--refresh",
+                        "--verbose",
+                    ]
+                )
+                catalog = {
+                    choice.value: choice
+                    for choice in opencode_choices_from_verbose(output)
+                }
+                variants_note = (
+                    " Reasoning variants loaded from the OpenCode catalog."
+                )
+            except (FileNotFoundError, subprocess.SubprocessError, ValueError):
+                pass
+            choices = []
+            for model in models:
+                catalog_choice = catalog.get(model)
+                choices.append(
+                    Choice(
+                        model,
+                        model.removeprefix("opencode-go/"),
+                        model,
+                        reasoning_levels=(
+                            catalog_choice.reasoning_levels
+                            if catalog_choice is not None
+                            else ()
+                        ),
+                    )
+                )
+            return choices, (
+                "Live model list loaded from the OpenCode Go API." + variants_note
+            )
         else:
             return [Choice("default", "Configured default", "Experimental selector.")], (
                 "This reviewer is experimental and fails closed during unattended review."
             )
-    except (FileNotFoundError, subprocess.SubprocessError, ValueError, opencode_go.AdapterError) as error:
+    except (
+        FileNotFoundError,
+        subprocess.SubprocessError,
+        ValueError,
+        opencode_go.AdapterError,
+    ) as error:
         return [], f"Model discovery failed: {error}"
 
     if reviewer != "opencode-go-api":
-        choices.insert(0, Choice("default", "Configured default", "Use the CLI's current default."))
+        choices.insert(
+            0,
+            Choice(
+                "default",
+                "Configured default",
+                "Use the CLI's current default.",
+            ),
+        )
     return choices, "Live account-aware model catalog loaded."
 
 
@@ -279,6 +434,9 @@ def load_state(path: Path = CONFIG_FILE) -> tuple[SetupState, str]:
             reviewer: list(configured)
             for reviewer, configured in review.get("models", {}).items()
         }
+        configured_reasoning = review.get("reasoning", {})
+        if not isinstance(configured_reasoning, dict):
+            raise ValueError("review.reasoning must be a table")
         allowed_reviewers = {choice.value for choice in REVIEWERS}
         if mode not in {choice.value for choice in MODES}:
             raise ValueError(f"unsupported backup mode {mode!r}")
@@ -300,6 +458,46 @@ def load_state(path: Path = CONFIG_FILE) -> tuple[SetupState, str]:
                 not model.startswith("opencode-go/") for model in configured
             ):
                 raise ValueError("OpenCode Go model IDs must start with opencode-go/")
+        reasoning: dict[str, dict[str, str]] = {}
+        for reviewer, configured in configured_reasoning.items():
+            if reviewer not in REASONING_REVIEWERS or not isinstance(configured, dict):
+                raise ValueError(f"review.reasoning.{reviewer} is invalid")
+            allowed_levels = {
+                "default",
+                "off",
+                "on",
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "thinking",
+                "xhigh",
+                "max",
+                "ultra",
+            }
+            allowed_models = set(models.get(reviewer, []))
+            if set(configured) - allowed_models:
+                raise ValueError(
+                    f"review.reasoning.{reviewer} contains an unconfigured model"
+                )
+            if any(
+                not isinstance(level, str) or level not in allowed_levels
+                for level in configured.values()
+            ):
+                raise ValueError(
+                    f"review.reasoning.{reviewer} contains an invalid level"
+                )
+        for reviewer in reviewers:
+            if reviewer not in REASONING_REVIEWERS:
+                continue
+            configured = configured_reasoning.get(reviewer, {})
+            reasoning[reviewer] = {
+                model: normalize_configured_reasoning(
+                    reviewer, model, configured.get(model, "default")
+                )
+                for model in models[reviewer]
+            }
         return (
             SetupState(
                 mode=mode,
@@ -307,6 +505,7 @@ def load_state(path: Path = CONFIG_FILE) -> tuple[SetupState, str]:
                 review=enabled,
                 reviewers=reviewers,
                 models=models,
+                reasoning=reasoning,
             ),
             "",
         )
@@ -335,6 +534,15 @@ def render_config(state: SetupState) -> str:
     ]
     for reviewer in state.reviewers:
         lines.append(f"{reviewer} = {toml_array(state.models[reviewer])}")
+    for reviewer in state.reviewers:
+        if reviewer not in REASONING_REVIEWERS:
+            continue
+        lines.extend(["", f"[review.reasoning.{reviewer}]"])
+        configured = state.reasoning.get(reviewer, {})
+        for model in state.models[reviewer]:
+            lines.append(
+                f"{json.dumps(model)} = {json.dumps(configured.get(model, 'default'))}"
+            )
     return "\n".join(lines) + "\n"
 
 
@@ -381,10 +589,17 @@ def save_state(state: SetupState) -> Path | None:
 
 
 class Wizard:
-    def __init__(self, screen: curses.window, state: SetupState, warning: str = "") -> None:
+    def __init__(
+        self,
+        screen: curses.window,
+        state: SetupState,
+        warning: str = "",
+        existing_config: bool = False,
+    ) -> None:
         self.screen = screen
         self.state = state
         self.warning = warning
+        self.existing_config = existing_config
         self._init_screen()
 
     def _init_screen(self) -> None:
@@ -500,11 +715,21 @@ class Wizard:
         subtitle: str,
         allow_manual: bool = False,
         manual_prefix: str = "",
+        reasoning: dict[str, str] | None = None,
     ) -> list[str] | None:
+        if reasoning is not None:
+            for value in selected:
+                reasoning.setdefault(value, "default")
         known = {choice.value for choice in choices}
         for value in selected:
             if value not in known:
-                choices.append(Choice(value, value, "Previously configured or manually entered."))
+                choices.append(
+                    Choice(
+                        value,
+                        value,
+                        "Previously configured or manually entered.",
+                    )
+                )
                 known.add(value)
         index = 0
         offset = 0
@@ -520,31 +745,77 @@ class Wizard:
             visible = choices[offset : offset + list_height]
             for row, choice in enumerate(visible):
                 item_index = offset + row
-                order = selected.index(choice.value) + 1 if choice.value in selected else 0
+                order = (
+                    selected.index(choice.value) + 1
+                    if choice.value in selected
+                    else 0
+                )
                 marker = f"[{order}]" if order else "[ ]"
                 style = curses.color_pair(2) if order else 0
                 if choice.experimental:
                     style = curses.color_pair(3)
                 if item_index == index:
                     style |= curses.A_REVERSE | curses.A_BOLD
-                self.add(y + row, 4, f"{marker:<4} {choice.label}", style)
+                reasoning_label = ""
+                configured_reasoning = (
+                    reasoning.get(choice.value, "default")
+                    if reasoning is not None
+                    else "default"
+                )
+                if reasoning is not None and order and (
+                    choice.reasoning_levels or configured_reasoning != "default"
+                ):
+                    reasoning_label = f" [{configured_reasoning}]"
+                self.add(
+                    y + row,
+                    4,
+                    f"{marker:<4} {choice.label}{reasoning_label}",
+                    style,
+                )
             detail_y = y + list_height + 1
             selected_labels = [
-                next((choice.label for choice in choices if choice.value == value), value)
+                (
+                    (selected_choice.label if selected_choice else value)
+                    + (
+                        f" [{reasoning.get(value, 'default')}]"
+                        if reasoning is not None
+                        and (
+                            (selected_choice and selected_choice.reasoning_levels)
+                            or reasoning.get(value, "default") != "default"
+                        )
+                        else ""
+                    )
+                )
                 for value in selected
+                for selected_choice in [
+                    next(
+                        (choice for choice in choices if choice.value == value),
+                        None,
+                    )
+                ]
             ]
             order_text = " → ".join(
                 f"{position}. {label}" for position, label in enumerate(selected_labels, 1)
             ) or "Nothing selected"
-            self.add(detail_y, 2, "Selected order", curses.A_BOLD | curses.color_pair(1))
+            self.add(
+                detail_y,
+                2,
+                "Selected order",
+                curses.A_BOLD | curses.color_pair(1),
+            )
             next_y = self.wrapped(detail_y + 1, order_text, curses.color_pair(2), 4)
             if choices:
                 self.wrapped(next_y, choices[index].description, curses.A_DIM, 4)
             if message:
                 self.add(height - 3, 2, message, curses.color_pair(4))
             manual_help = "  •  M manual ID" if allow_manual else ""
+            highlighted_levels = (
+                choices[index].reasoning_levels if choices else ()
+            )
+            reasoning_help = "  •  R reasoning" if highlighted_levels else ""
             self.footer(
-                f"↑↓ navigate  •  Space select/remove  •  ←→ reorder{manual_help}"
+                f"↑↓ navigate  •  Space select/remove  •  ←→ reorder"
+                f"{reasoning_help}{manual_help}"
                 "  •  Enter confirm  •  Esc back  •  Q cancel"
             )
             self.screen.refresh()
@@ -556,10 +827,35 @@ class Wizard:
                 index = (index + 1) % len(choices)
             elif key == ord(" ") and choices:
                 selected = toggle_selection(selected, choices[index].value)
+                if reasoning is not None and choices[index].value in selected:
+                    reasoning.setdefault(choices[index].value, "default")
             elif key == curses.KEY_LEFT and choices:
                 selected = move_selection(selected, choices[index].value, -1)
             elif key == curses.KEY_RIGHT and choices:
                 selected = move_selection(selected, choices[index].value, 1)
+            elif key in (ord("r"), ord("R")) and choices:
+                model = choices[index].value
+                model_choices = reasoning_choices(choices[index].reasoning_levels)
+                reasoning_levels = [choice.value for choice in model_choices]
+                if not reasoning_levels:
+                    message = "This model has no configurable reasoning control."
+                elif model not in selected:
+                    message = "Select this model before changing its reasoning level."
+                else:
+                    current = (
+                        reasoning.get(model, "default")
+                        if reasoning
+                        else "default"
+                    )
+                    current_index = (
+                        reasoning_levels.index(current)
+                        if current in reasoning_levels
+                        else 0
+                    )
+                    if reasoning is not None:
+                        reasoning[model] = reasoning_levels[
+                            (current_index + 1) % len(reasoning_levels)
+                        ]
             elif key in (ord("m"), ord("M")) and allow_manual:
                 manual = self.prompt_text("Manual model ID", secret=False)
                 if manual and not MODEL_ID.fullmatch(manual):
@@ -573,6 +869,8 @@ class Wizard:
                     choices.append(Choice(manual, manual, "Manually entered model ID."))
                     known.add(manual)
                     selected.append(manual)
+                    if reasoning is not None:
+                        reasoning[manual] = "default"
                     index = len(choices) - 1
             elif key in (10, 13, curses.KEY_ENTER):
                 if selected:
@@ -701,7 +999,16 @@ class Wizard:
                 )
             )
             for reviewer in self.state.reviewers:
-                lines.append(f"{reviewer}: {' → '.join(self.state.models[reviewer])}")
+                configured = self.state.reasoning.get(reviewer, {})
+                attempts = [
+                    (
+                        f"{model} ({configured.get(model, 'default')})"
+                        if reviewer in REASONING_REVIEWERS
+                        else model
+                    )
+                    for model in self.state.models[reviewer]
+                ]
+                lines.append(f"{reviewer}: {' → '.join(attempts)}")
         choice = self.select_one(
             "Review and save",
             [
@@ -718,6 +1025,35 @@ class Wizard:
         return choice == "save"
 
     def run(self) -> None:
+        if self.existing_config and not self.warning:
+            action = self.select_one(
+                "Existing configuration found",
+                [
+                    Choice(
+                        "update",
+                        "Update existing configuration",
+                        "Keep your current choices selected and change only what you need.",
+                    ),
+                    Choice(
+                        "reset",
+                        "Start from scratch",
+                        "Reset every choice to the setup defaults.",
+                    ),
+                ],
+                "update",
+                subtitle="Choose how to configure auto-backup.",
+                allow_back=False,
+            )
+            if action == "reset":
+                defaults = SetupState()
+                self.state.mode = defaults.mode
+                self.state.rebase = defaults.rebase
+                self.state.review = defaults.review
+                self.state.reviewers = defaults.reviewers
+                self.state.models = defaults.models
+                self.state.reasoning = defaults.reasoning
+                self.state.pending_go_key = defaults.pending_go_key
+                self.state.go_key_source = defaults.go_key_source
         if self.warning:
             self.select_one(
                 "Existing configuration warning",
@@ -791,6 +1127,7 @@ class Wizard:
                 else:
                     self.state.reviewers = []
                     self.state.models = {}
+                    self.state.reasoning = {}
                     summary_back = "review"
                     stage = "summary"
 
@@ -813,6 +1150,11 @@ class Wizard:
                     for reviewer, models in self.state.models.items()
                     if reviewer in selected
                 }
+                self.state.reasoning = {
+                    reviewer: configured
+                    for reviewer, configured in self.state.reasoning.items()
+                    if reviewer in selected
+                }
                 model_index = 0
                 stage = "models"
 
@@ -821,7 +1163,7 @@ class Wizard:
                     if "opencode-go-api" in self.state.reviewers:
                         stage = "credential"
                     else:
-                        summary_back = "reviewers"
+                        summary_back = "models"
                         stage = "summary"
                     continue
 
@@ -840,6 +1182,27 @@ class Wizard:
                         Choice(model, model, "Previously configured model.")
                         for model in existing
                     ]
+                supports_reasoning = reviewer in REASONING_REVIEWERS
+                if supports_reasoning:
+                    existing_reasoning = self.state.reasoning.get(reviewer, {})
+                    choice_by_model = {choice.value: choice for choice in choices}
+                    self.state.reasoning[reviewer] = {
+                        model: (
+                            existing_reasoning.get(model, "default")
+                            if existing_reasoning.get(model, "default")
+                            in {
+                                choice.value
+                                for choice in reasoning_choices(
+                                    choice_by_model.get(
+                                        model,
+                                        Choice(model, model, ""),
+                                    ).reasoning_levels
+                                )
+                            }
+                            else "default"
+                        )
+                        for model in existing
+                    }
                 models = self.select_ordered(
                     f"Models for {reviewer}",
                     choices,
@@ -849,6 +1212,11 @@ class Wizard:
                     manual_prefix=(
                         "opencode-go/" if reviewer == "opencode-go-api" else ""
                     ),
+                    reasoning=(
+                        self.state.reasoning[reviewer]
+                        if supports_reasoning
+                        else None
+                    ),
                 )
                 if models is None:
                     if model_index == 0:
@@ -857,6 +1225,11 @@ class Wizard:
                         model_index -= 1
                     continue
                 self.state.models[reviewer] = models
+                if supports_reasoning:
+                    self.state.reasoning[reviewer] = {
+                        model: self.state.reasoning[reviewer].get(model, "default")
+                        for model in models
+                    }
                 model_index += 1
 
             elif stage == "credential":
@@ -869,12 +1242,14 @@ class Wizard:
                 if action == "remove":
                     self.state.reviewers.remove("opencode-go-api")
                     self.state.models.pop("opencode-go-api", None)
-                summary_back = "reviewers"
+                summary_back = "models"
                 stage = "summary"
 
             elif stage == "summary":
                 if self.summary():
                     return
+                if summary_back == "models":
+                    model_index = max(0, len(self.state.reviewers) - 1)
                 stage = summary_back
 
 
@@ -892,7 +1267,14 @@ def main() -> int:
         return 1
     state, warning = load_state()
     try:
-        curses.wrapper(lambda screen: Wizard(screen, state, warning).run())
+        curses.wrapper(
+            lambda screen: Wizard(
+                screen,
+                state,
+                warning,
+                existing_config=CONFIG_FILE.exists(),
+            ).run()
+        )
     except Cancelled:
         print("Setup cancelled; existing configuration was not changed.")
         return 130
