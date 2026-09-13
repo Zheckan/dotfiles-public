@@ -214,7 +214,7 @@ load_toml_config() {
 
   while IFS=$'\t' read -r key value; do
     case "$key" in
-      DOTFILES_AUTOBACKUP_MODE|DOTFILES_AUTOBACKUP_REBASE|DOTFILES_AUTOBACKUP_REVIEW|DOTFILES_REVIEWERS|DOTFILES_REVIEW_CLAUDE_MODELS|DOTFILES_REVIEW_CODEX_MODELS|DOTFILES_REVIEW_AGY_MODELS|DOTFILES_REVIEW_OPENCODE_MODELS|DOTFILES_REVIEW_OPENCODE_GO_API_MODELS|DOTFILES_REVIEW_CURSOR_MODELS|DOTFILES_REVIEW_OLLAMA_MODELS)
+      DOTFILES_AUTOBACKUP_MODE|DOTFILES_AUTOBACKUP_REBASE|DOTFILES_AUTOBACKUP_REVIEW|DOTFILES_REVIEWERS|DOTFILES_REVIEW_CLAUDE_MODELS|DOTFILES_REVIEW_CODEX_MODELS|DOTFILES_REVIEW_AGY_MODELS|DOTFILES_REVIEW_OPENCODE_MODELS|DOTFILES_REVIEW_OPENCODE_GO_API_MODELS|DOTFILES_REVIEW_CURSOR_MODELS|DOTFILES_REVIEW_OLLAMA_MODELS|DOTFILES_REVIEW_CLAUDE_REASONING|DOTFILES_REVIEW_CODEX_REASONING|DOTFILES_REVIEW_OPENCODE_REASONING|DOTFILES_REVIEW_OPENCODE_GO_API_REASONING)
         printf -v "$key" '%s' "$value"
         ;;
       *)
@@ -257,6 +257,10 @@ DOTFILES_REVIEW_CODEX_MODELS="${DOTFILES_REVIEW_CODEX_MODELS:-}"
 DOTFILES_REVIEW_AGY_MODELS="${DOTFILES_REVIEW_AGY_MODELS:-}"
 DOTFILES_REVIEW_OPENCODE_MODELS="${DOTFILES_REVIEW_OPENCODE_MODELS:-}"
 DOTFILES_REVIEW_OPENCODE_GO_API_MODELS="${DOTFILES_REVIEW_OPENCODE_GO_API_MODELS:-}"
+DOTFILES_REVIEW_CLAUDE_REASONING="${DOTFILES_REVIEW_CLAUDE_REASONING:-}"
+DOTFILES_REVIEW_CODEX_REASONING="${DOTFILES_REVIEW_CODEX_REASONING:-}"
+DOTFILES_REVIEW_OPENCODE_REASONING="${DOTFILES_REVIEW_OPENCODE_REASONING:-}"
+DOTFILES_REVIEW_OPENCODE_GO_API_REASONING="${DOTFILES_REVIEW_OPENCODE_GO_API_REASONING:-}"
 
 # ── Flags ─────────────────────────────────────────────────────────
 # --main-pc    : Full flow — rebase, backup, review, PR, merge
@@ -514,6 +518,29 @@ models_for_reviewer() {
   fi
 
   printf 'default\n'
+}
+
+reasoning_for_reviewer_model() {
+  local reviewer="$1"
+  local model_index="$2"
+  local raw=""
+  local levels=()
+
+  case "$reviewer" in
+    claude) raw="${DOTFILES_REVIEW_CLAUDE_REASONING:-}" ;;
+    codex) raw="${DOTFILES_REVIEW_CODEX_REASONING:-}" ;;
+    opencode) raw="${DOTFILES_REVIEW_OPENCODE_REASONING:-}" ;;
+    opencode-go-api) raw="${DOTFILES_REVIEW_OPENCODE_GO_API_REASONING:-}" ;;
+  esac
+
+  [[ -n "$raw" ]] || {
+    printf 'default'
+    return 0
+  }
+  while IFS= read -r level; do
+    levels+=("$level")
+  done < <(split_csv_lines "$raw")
+  printf '%s' "${levels[$model_index]:-default}"
 }
 
 first_review_line() {
@@ -987,6 +1014,7 @@ run_opencode_review() {
   local repo_root="$4"
   local actual_model_file="$5"
   local detail_file="$6"
+  local reasoning="${7:-default}"
   local try_args=()
   local tmp_json tmp_review tmp_error try_exit
 
@@ -999,6 +1027,7 @@ run_opencode_review() {
     try_args=(-m "$model")
     printf '%s' "$model" > "$actual_model_file"
   fi
+  [[ "$reasoning" != "default" ]] && try_args+=(--variant "$reasoning")
 
   tmp_json="$(mktemp)"
   tmp_review="$(mktemp)"
@@ -1032,6 +1061,7 @@ run_opencode_go_api_review() {
   local _repo_root="$4"
   local actual_model_file="$5"
   local detail_file="$6"
+  local reasoning="${7:-default}"
   local api_key="${OPENCODE_GO_API_KEY:-}"
   local prompt_file try_exit
 
@@ -1048,7 +1078,7 @@ run_opencode_go_api_review() {
   printf '%s\n\nReview this pull request diff:\n%s\n' "$prompt" "$diff" > "$prompt_file"
   printf '%s' "$model" > "$actual_model_file"
   OPENCODE_GO_API_KEY="$api_key" \
-    python3 "$SCRIPT_DIR/opencode_go.py" review "$model" "$prompt_file" \
+    python3 "$SCRIPT_DIR/opencode_go.py" review "$model" "$prompt_file" "$reasoning" \
       2>"$detail_file"
   try_exit=$?
   rm -f "$prompt_file"
@@ -1062,11 +1092,23 @@ run_claude_review() {
   local actual_model_file="$4"
   local detail_file="$5"
   local auxiliary_models_file="${6:-}"
+  local reasoning="${7:-default}"
+  local enable_thinking=false
+  local disable_thinking=false
   local try_args=()
   local tmp_stream tmp_review tmp_model tmp_auxiliary tmp_error try_output try_exit
 
   command -v claude &>/dev/null || return 127
   [[ "$model" != "default" ]] && try_args=(--model "$model")
+  case "$reasoning" in
+    default) ;;
+    on)
+      enable_thinking=true
+      try_args+=(--settings '{"alwaysThinkingEnabled":true}')
+      ;;
+    off) disable_thinking=true ;;
+    *) try_args+=(--effort "$reasoning") ;;
+  esac
 
   tmp_stream="$(mktemp)"
   tmp_review="$(mktemp)"
@@ -1074,7 +1116,16 @@ run_claude_review() {
   tmp_auxiliary="$(mktemp)"
   tmp_error="$(mktemp)"
 
-  try_output=$(printf '%s' "$diff" | claude -p "${try_args[@]}" --output-format stream-json --verbose "$prompt" > "$tmp_stream" 2>"$tmp_error")
+  if [[ "$enable_thinking" == true ]]; then
+    try_output=$(printf '%s' "$diff" | (
+      unset CLAUDE_CODE_DISABLE_THINKING MAX_THINKING_TOKENS
+      claude -p "${try_args[@]}" --output-format stream-json --verbose "$prompt"
+    ) > "$tmp_stream" 2>"$tmp_error")
+  elif [[ "$disable_thinking" == true ]]; then
+    try_output=$(printf '%s' "$diff" | CLAUDE_CODE_DISABLE_THINKING=1 claude -p "${try_args[@]}" --output-format stream-json --verbose "$prompt" > "$tmp_stream" 2>"$tmp_error")
+  else
+    try_output=$(printf '%s' "$diff" | claude -p "${try_args[@]}" --output-format stream-json --verbose "$prompt" > "$tmp_stream" 2>"$tmp_error")
+  fi
   try_exit=$?
 
   if [[ $try_exit -eq 0 ]] \
@@ -1104,12 +1155,15 @@ run_codex_review() {
   local repo_root="$4"
   local actual_model_file="$5"
   local detail_file="$6"
+  local reasoning="${7:-default}"
   local try_args=()
   local tmp_json tmp_review tmp_error
   local try_exit
 
   command -v codex &>/dev/null || return 127
   [[ "$model" != "default" ]] && try_args=(-m "$model")
+  [[ "$reasoning" != "default" ]] &&
+    try_args+=(-c "model_reasoning_effort=\"$reasoning\"")
 
   if [[ "$model" == "default" ]]; then
     read_codex_default_model > "$actual_model_file" || printf '%s' "$model" > "$actual_model_file"
@@ -1224,13 +1278,14 @@ run_review_attempt() {
   local actual_model_file="$6"
   local detail_file="$7"
   local auxiliary_models_file="${8:-}"
+  local reasoning="${9:-default}"
 
   case "$reviewer" in
-    claude) run_claude_review "$model" "$prompt" "$diff" "$actual_model_file" "$detail_file" "$auxiliary_models_file" ;;
-    codex) run_codex_review "$model" "$prompt" "$diff" "$repo_root" "$actual_model_file" "$detail_file" ;;
+    claude) run_claude_review "$model" "$prompt" "$diff" "$actual_model_file" "$detail_file" "$auxiliary_models_file" "$reasoning" ;;
+    codex) run_codex_review "$model" "$prompt" "$diff" "$repo_root" "$actual_model_file" "$detail_file" "$reasoning" ;;
     agy) run_agy_review "$model" "$prompt" "$diff" "$repo_root" "$actual_model_file" "$detail_file" ;;
-    opencode) run_opencode_review "$model" "$prompt" "$diff" "$repo_root" "$actual_model_file" "$detail_file" ;;
-    opencode-go-api) run_opencode_go_api_review "$model" "$prompt" "$diff" "$repo_root" "$actual_model_file" "$detail_file" ;;
+    opencode) run_opencode_review "$model" "$prompt" "$diff" "$repo_root" "$actual_model_file" "$detail_file" "$reasoning" ;;
+    opencode-go-api) run_opencode_go_api_review "$model" "$prompt" "$diff" "$repo_root" "$actual_model_file" "$detail_file" "$reasoning" ;;
     cursor|ollama) run_experimental_review "$reviewer" "$detail_file" ;;
     *) return 64 ;;
   esac
@@ -1245,7 +1300,8 @@ review_pr() {
   local attempts=()
   local diagnostics=()
   local normalizations=()
-  local reviewer model review try_output try_exit verdict
+  local reviewer model reasoning review try_output try_exit verdict
+  local model_index
   local reviewer_name reviewer_link footer actual_model actual_model_file detail_file
   local auxiliary_models auxiliary_models_file
   local raw_detail detail normalized_review_file normalization_file normalization_detail
@@ -1293,13 +1349,16 @@ review_pr() {
     done < <(models_for_reviewer "$reviewer" "$prompt_file")
     [[ "${#models[@]}" -eq 0 ]] && models=("default")
 
+    model_index=0
     for model in "${models[@]}"; do
+      reasoning="$(reasoning_for_reviewer_model "$reviewer" "$model_index")"
+      model_index=$((model_index + 1))
       reviewer_name="$(reviewer_display_name "$reviewer")"
       actual_model_file="$(mktemp)"
       detail_file="$(mktemp)"
       auxiliary_models_file="$(mktemp)"
-      echo "  ↳ reviewing with $reviewer_name (model: $model)..." >&2
-      try_output="$(run_review_attempt "$reviewer" "$model" "$prompt" "$diff" "$repo_root" "$actual_model_file" "$detail_file" "$auxiliary_models_file")"
+      echo "  ↳ reviewing with $reviewer_name (model: $model, reasoning: $reasoning)..." >&2
+      try_output="$(run_review_attempt "$reviewer" "$model" "$prompt" "$diff" "$repo_root" "$actual_model_file" "$detail_file" "$auxiliary_models_file" "$reasoning")"
       try_exit=$?
 
       if [[ $try_exit -eq 0 && -n "$try_output" ]]; then
@@ -1334,6 +1393,7 @@ review_pr() {
         else
           footer="> Reviewed by **$reviewer_name** (model: \`$model\`)"
         fi
+        footer="$footer (reasoning: \`$reasoning\`)"
         [[ -n "$reviewer_link" ]] && footer="$footer via [$reviewer_name]($reviewer_link)"
         if [[ -n "$auxiliary_models" ]]; then
           footer="$footer

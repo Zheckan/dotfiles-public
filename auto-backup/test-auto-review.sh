@@ -34,6 +34,13 @@ reviewers = ["agy", "opencode"]
 [review.models]
 agy = ["gemini-3.7-flash-low", "claude-sonnet-4-6"]
 opencode = ["opencode/muse-spark-1.2-contributor-free"]
+opencode-go-api = ["opencode-go/deepseek-v4-flash"]
+
+[review.reasoning.opencode]
+"opencode/muse-spark-1.2-contributor-free" = "high"
+
+[review.reasoning.opencode-go-api]
+"opencode-go/deepseek-v4-flash" = "max"
 TOML
 
   output="$(python3 "$SCRIPT_DIR/config.py" "$config")"
@@ -45,6 +52,31 @@ TOML
     fail "TOML reviewer order was not flattened"
   [[ "$output" == *$'DOTFILES_REVIEW_AGY_MODELS\tgemini-3.7-flash-low,claude-sonnet-4-6'* ]] ||
     fail "TOML AGY models were not flattened"
+  [[ "$output" == *$'DOTFILES_REVIEW_OPENCODE_REASONING\thigh'* ]] ||
+    fail "TOML OpenCode reasoning was not flattened"
+  [[ "$output" == *$'DOTFILES_REVIEW_OPENCODE_GO_API_REASONING\tmax'* ]] ||
+    fail "TOML OpenCode Go reasoning was not flattened"
+  [[ "$output" == *$'DOTFILES_REVIEW_CLAUDE_REASONING\t'* ]] ||
+    fail "TOML Claude reasoning key was not emitted"
+
+  cat > "$config" <<'TOML'
+[backup]
+mode = "pr-only"
+rebase = true
+
+[review]
+enabled = true
+reviewers = ["claude"]
+
+[review.models]
+claude = ["haiku"]
+
+[review.reasoning.claude]
+haiku = "high"
+TOML
+  output="$(python3 "$SCRIPT_DIR/config.py" "$config")"
+  [[ "$output" == *$'DOTFILES_REVIEW_CLAUDE_REASONING\tdefault'* ]] ||
+    fail "legacy incompatible Haiku effort did not fall back to default"
 
   cat > "$config" <<'TOML'
 [backup]
@@ -81,6 +113,9 @@ reviewers = ["claude"]
 
 [review.models]
 claude = ["default"]
+
+[review.reasoning.claude]
+default = "default"
 TOML
 }
 
@@ -492,7 +527,8 @@ JSONL
     "diff --git a/file b/file" \
     "$actual_model_file" \
     "$detail_file" \
-    "$auxiliary_file")"
+    "$auxiliary_file" \
+    "high")"
   review_exit=$?
   set -e
   unset -f claude
@@ -507,6 +543,115 @@ Clean backup." "$output" "Claude stream adapter output"
     "Claude stream auxiliary model"
   grep -Fxq -- "stream-json" "$args_file" || fail "Claude stream output format missing"
   grep -Fxq -- "--verbose" "$args_file" || fail "Claude verbose stream flag missing"
+  grep -Fxq -- "--effort" "$args_file" || fail "Claude effort flag missing"
+  grep -Fxq -- "high" "$args_file" || fail "Claude effort value missing"
+
+  rm -rf "$work_dir"
+}
+
+test_claude_haiku_uses_thinking_toggle_instead_of_effort() {
+  local work_dir args_file env_file actual_model_file detail_file output
+  work_dir="$(mktemp -d "${TMPDIR:-/tmp}/dotfiles-claude-thinking-test.XXXXXX")"
+  args_file="$work_dir/args"
+  env_file="$work_dir/env"
+  actual_model_file="$work_dir/model"
+  detail_file="$work_dir/detail"
+
+  claude() {
+    printf '%s\n' "$@" > "$args_file"
+    printf '%s\n%s' \
+      "${CLAUDE_CODE_DISABLE_THINKING:-}" \
+      "${MAX_THINKING_TOKENS:-}" > "$env_file"
+    cat > /dev/null
+    cat <<'JSONL'
+{"type":"assistant","message":{"model":"claude-haiku-4-5","content":[{"type":"text","text":"APPROVED"}]},"parent_tool_use_id":null}
+{"type":"result","subtype":"success","is_error":false,"result":"APPROVED","modelUsage":{"claude-haiku-4-5":{}}}
+JSONL
+  }
+
+  output="$(run_claude_review \
+    "haiku" \
+    "Apply the review policy." \
+    "diff --git a/file b/file" \
+    "$actual_model_file" \
+    "$detail_file" \
+    "" \
+    "off")"
+  assert_eq "APPROVED" "$output" "Claude Haiku thinking-off output"
+  assert_eq "1" "$(sed -n '1p' "$env_file")" "Claude Haiku thinking-off environment"
+  if grep -Fxq -- "--effort" "$args_file"; then
+    fail "Claude Haiku thinking toggle was sent as an effort level"
+  fi
+
+  export CLAUDE_CODE_DISABLE_THINKING=1 MAX_THINKING_TOKENS=0
+  output="$(run_claude_review \
+    "haiku" \
+    "Apply the review policy." \
+    "diff --git a/file b/file" \
+    "$actual_model_file" \
+    "$detail_file" \
+    "" \
+    "on")"
+  unset CLAUDE_CODE_DISABLE_THINKING MAX_THINKING_TOKENS
+  assert_eq "APPROVED" "$output" "Claude Haiku thinking-on output"
+  assert_eq "" "$(sed -n '1p' "$env_file")" \
+    "Claude Haiku thinking-on clears inherited disable flag"
+  assert_eq "" "$(sed -n '2p' "$env_file")" \
+    "Claude Haiku thinking-on clears inherited zero-token budget"
+  grep -Fxq -- "--settings" "$args_file" ||
+    fail "Claude Haiku thinking-on setting missing"
+  grep -Fxq -- '{"alwaysThinkingEnabled":true}' "$args_file" ||
+    fail "Claude Haiku thinking-on value missing"
+
+  unset -f claude
+  rm -rf "$work_dir"
+}
+
+test_codex_and_opencode_reviews_apply_configured_reasoning() {
+  local work_dir codex_args opencode_args actual_model_file detail_file output
+  work_dir="$(mktemp -d "${TMPDIR:-/tmp}/dotfiles-reasoning-adapters-test.XXXXXX")"
+  codex_args="$work_dir/codex-args"
+  opencode_args="$work_dir/opencode-args"
+  actual_model_file="$work_dir/model"
+  detail_file="$work_dir/detail"
+
+  codex() {
+    printf '%s\n' "$@" > "$codex_args"
+    cat > /dev/null
+    printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"APPROVED"}}'
+  }
+  output="$(run_codex_review \
+    "gpt-5.6-sol" \
+    "Apply the review policy." \
+    "diff --git a/file b/file" \
+    "$REPO_DIR" \
+    "$actual_model_file" \
+    "$detail_file" \
+    "xhigh")"
+  unset -f codex
+
+  assert_eq "APPROVED" "$output" "Codex reasoning adapter output"
+  grep -Fxq -- "model_reasoning_effort=\"xhigh\"" "$codex_args" ||
+    fail "Codex reasoning override missing"
+
+  opencode() {
+    printf '%s\n' "$@" > "$opencode_args"
+    cat > /dev/null
+    printf '%s\n' '{"type":"text","part":{"id":"review","text":"APPROVED"}}'
+  }
+  output="$(run_opencode_review \
+    "opencode-go/grok-4.6" \
+    "Apply the review policy." \
+    "diff --git a/file b/file" \
+    "$REPO_DIR" \
+    "$actual_model_file" \
+    "$detail_file" \
+    "high")"
+  unset -f opencode
+
+  assert_eq "APPROVED" "$output" "OpenCode reasoning adapter output"
+  grep -Fxq -- "--variant" "$opencode_args" || fail "OpenCode variant flag missing"
+  grep -Fxq -- "high" "$opencode_args" || fail "OpenCode variant value missing"
 
   rm -rf "$work_dir"
 }
@@ -669,6 +814,7 @@ test_opencode_go_api_review_uses_separate_key_and_helper() {
         [[ "$3" == "opencode-go/deepseek-v4-flash" ]] || return 10
         grep -Fq "Apply the review policy." "$4" || return 11
         grep -Fq "diff --git a/file b/file" "$4" || return 12
+        [[ "$5" == "max" ]] || return 14
         printf 'APPROVED\n\n### Summary\nClean backup.\n'
         ;;
       *)
@@ -683,7 +829,8 @@ test_opencode_go_api_review_uses_separate_key_and_helper() {
     "diff --git a/file b/file" \
     "$REPO_DIR" \
     "$actual_model_file" \
-    "$detail_file")"
+    "$detail_file" \
+    "max")"
   unset -f python3
 
   assert_eq "APPROVED
@@ -1046,6 +1193,8 @@ test_correct_output_is_unchanged
 test_claude_stream_reports_response_and_auxiliary_models
 test_claude_stream_empty_result_uses_final_assistant_message
 test_claude_review_uses_stream_response_model
+test_claude_haiku_uses_thinking_toggle_instead_of_effort
+test_codex_and_opencode_reviews_apply_configured_reasoning
 test_sanitize_attempt_reason
 test_sanitize_authorization_bearer
 test_sanitize_claude_json_auth_error

@@ -25,6 +25,17 @@ USER_AGENT = "dotfiles-auto-backup/1.0"
 SESSION_HEADER = "x-opencode-session"
 SESSION_ENV_KEY = "OPENCODE_GO_SESSION_ID"
 VALIDATION_MAX_TOKENS = 16
+REASONING_LEVELS = {
+    "default",
+    "none",
+    "minimal",
+    "low",
+    "medium",
+    "high",
+    "thinking",
+    "xhigh",
+    "max",
+}
 
 
 @functools.lru_cache(maxsize=1)
@@ -81,15 +92,23 @@ def protocol_for_model(model: str) -> str:
     return "chat"
 
 
+def normalize_reasoning(reasoning: str) -> str:
+    if reasoning not in REASONING_LEVELS:
+        fail(f"invalid OpenCode Go reasoning level {reasoning!r}")
+    return reasoning
+
+
 def build_request(
     model: str,
     prompt: str,
     api_key: str,
     max_tokens: int,
     *,
+    reasoning: str = "default",
     base_url: str = BASE_URL,
 ) -> urllib.request.Request:
     model = normalize_model(model)
+    reasoning = normalize_reasoning(reasoning)
     protocol = protocol_for_model(model)
     headers = {"Content-Type": "application/json", **default_headers()}
 
@@ -101,6 +120,8 @@ def build_request(
             "input": prompt,
             "max_output_tokens": max_tokens,
         }
+        if reasoning != "default":
+            payload["reasoning"] = {"effort": reasoning}
     elif protocol == "anthropic":
         endpoint = "messages"
         headers["x-api-key"] = api_key
@@ -110,6 +131,12 @@ def build_request(
             "max_tokens": max_tokens,
             "messages": [{"role": "user", "content": prompt}],
         }
+        if model.startswith("minimax-m3") and reasoning in {"none", "thinking"}:
+            payload["thinking"] = {
+                "type": "disabled" if reasoning == "none" else "adaptive"
+            }
+        elif reasoning != "default":
+            payload["output_config"] = {"effort": reasoning}
     else:
         endpoint = "chat/completions"
         headers["Authorization"] = f"Bearer {api_key}"
@@ -118,6 +145,8 @@ def build_request(
             "max_tokens": max_tokens,
             "messages": [{"role": "user", "content": prompt}],
         }
+        if reasoning != "default":
+            payload["reasoning_effort"] = reasoning
 
     return urllib.request.Request(
         f"{base_url.rstrip('/')}/{endpoint}",
@@ -212,10 +241,22 @@ def list_models(api_key: str = "") -> list[str]:
     return parse_models(api_request(request, timeout=30))
 
 
-def run_inference(model: str, prompt: str, api_key: str, max_tokens: int) -> str:
+def run_inference(
+    model: str,
+    prompt: str,
+    api_key: str,
+    max_tokens: int,
+    reasoning: str = "default",
+) -> str:
     if not api_key:
         fail(f"{ENV_KEY} is not configured")
-    request = build_request(model, prompt, api_key, max_tokens)
+    request = build_request(
+        model,
+        prompt,
+        api_key,
+        max_tokens,
+        reasoning=reasoning,
+    )
     payload = api_request(request, timeout=180)
     return extract_text(protocol_for_model(model), payload)
 
@@ -274,7 +315,7 @@ def safe_error(error: BaseException) -> str:
 def usage() -> NoReturn:
     fail(
         "usage: opencode_go.py models | read-key ENV_FILE | "
-        "review MODEL PROMPT_FILE | validate MODEL"
+        "review MODEL PROMPT_FILE [REASONING] | validate MODEL"
     )
 
 
@@ -290,12 +331,21 @@ def main() -> None:
     if command == "read-key" and len(sys.argv) == 3:
         print(read_env_key(Path(sys.argv[2])))
         return
-    if command == "review" and len(sys.argv) == 4:
+    if command == "review" and len(sys.argv) in {4, 5}:
         try:
             prompt = Path(sys.argv[3]).read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError) as error:
             fail(f"cannot read review prompt: {error}")
-        print(run_inference(sys.argv[2], prompt, os.environ.get(ENV_KEY, ""), 4096))
+        reasoning = sys.argv[4] if len(sys.argv) == 5 else "default"
+        print(
+            run_inference(
+                sys.argv[2],
+                prompt,
+                os.environ.get(ENV_KEY, ""),
+                4096,
+                reasoning,
+            )
+        )
         return
     if command == "validate" and len(sys.argv) == 3:
         run_inference(

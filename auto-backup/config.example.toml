@@ -10,3 +10,16 @@ enabled = false
 reviewers = []
 
 [review.models]
+
+# Generated configs add one table per configurable reviewer and one entry per model.
+# Choices are model-specific. AGY encodes effort in its model IDs; experimental
+# reviewers keep their provider defaults.
+[review.reasoning]
+# [review.reasoning.claude]
+# opus = "high"
+# [review.reasoning.codex]
+# "gpt-5.6-sol" = "high"
+# [review.reasoning.opencode]
+# "opencode/muse-spark-1.2-contributor-free" = "high"
+# [review.reasoning.opencode-go-api]
+# "opencode-go/deepseek-v4-flash" = "max"
