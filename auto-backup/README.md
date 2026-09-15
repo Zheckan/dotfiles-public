@@ -12,7 +12,14 @@ Install `terminal-notifier` for clickable notifications (opens PR in browser on 
 brew install terminal-notifier
 ```
 
-Without it, notifications fall back to `osascript` (no click-to-open).
+Without it, notifications fall back to `osascript`. macOS gives those no click
+action: clicking one opens Script Editor, not the PR. The fallback shows the PR link
+as text, and the link is also written to the auto-backup log.
+
+Homebrew installs `terminal-notifier.app` outside `/Applications`, and LaunchServices
+sometimes re-registers it as it launches. Notification Center can reject that post
+as unauthorized even though notifications are allowed, so the script retries
+`terminal-notifier` once after three seconds before falling back.
 
 Test notification delivery without running a backup or loading machine config:
 
@@ -228,6 +235,20 @@ Before auto-merging, the script runs the PR diff through an AI reviewer. The rev
 
 The review is written into the **PR description** with a structured summary including a confidence level and risk table.
 
+### Review input
+
+Reviewers get a changed-files manifest ahead of the diff. Some apps store a whole JSON
+document on one line (VS Code profile `extensions.json` files run to ~70k characters),
+so one extension update rewrites the full line and a few profiles can push the diff past
+500 KB. `review_diff.py` replaces those hunks with a structural diff listing every added,
+removed, and changed value. It only does so when both versions parse, so a corrupted
+file keeps its raw diff.
+
+After each review, the script checks that every changed path appears in the review,
+either directly or under a backticked glob such as
+`apps/editors/vscode/profiles/*/extensions.json`. A review that leaves files out counts
+as a failed attempt, and the next model or reviewer runs.
+
 ### Review config
 
 The review prompt lives in `.github/review-prompt.md`. Reviewer and model order lives
@@ -278,6 +299,7 @@ PR created → gh pr diff → configured reviewer/model attempts
                             APPROVED? → squash-merge
                             CHANGES_REQUESTED? → leave PR open + notify
                             error/empty/invalid? → try next model/reviewer
+                            omits a changed file? → try next model/reviewer
                             single misplaced verdict? → repair body + record diagnostic
                             all failed? → leave PR open + notify
 ```
