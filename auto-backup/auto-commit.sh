@@ -58,6 +58,20 @@ shell_single_quote() {
 }
 
 run_terminal_notifier() {
+  terminal_notifier_attempt "$@" && return 0
+
+  # Homebrew's terminal-notifier.app lives outside /Applications, and
+  # LaunchServices sometimes re-registers it as it launches. usernoted can then
+  # reject the post ("Failed to find or validate client"), which surfaces as a
+  # permission denial even though notifications are allowed. The registration
+  # has settled by the retry; without it the osascript fallback's click opens
+  # Script Editor instead of the PR.
+  printf 'auto-commit: retrying terminal-notifier once\n' >&2
+  sleep 3
+  terminal_notifier_attempt "$@"
+}
+
+terminal_notifier_attempt() {
   local output status
 
   if output="$(terminal-notifier "$@" 2>&1)"; then
@@ -233,6 +247,11 @@ if [[ ! -f "$CONFIG_FILE" ]]; then
 fi
 load_toml_config "$CONFIG_FILE"
 
+# Resolved before the secret-file check, which asks this repo's git whether
+# auto-backup/.env is tracked.
+DEFAULT_REPO_DIR="$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel 2>/dev/null || (cd "$SCRIPT_DIR/.." && pwd))"
+DOTFILES_REPO_DIR="${DOTFILES_REPO_DIR:-$DEFAULT_REPO_DIR}"
+
 OPENCODE_GO_ENV_FILE="${DOTFILES_OPENCODE_GO_ENV_FILE:-$SCRIPT_DIR/.env}"
 validate_opencode_go_secret_file() {
   local detail
@@ -399,8 +418,6 @@ NO_REVIEW=false
 [[ "$DOTFILES_AUTOBACKUP_REBASE" == "false" ]] && NO_REBASE=true
 [[ "$DOTFILES_AUTOBACKUP_REVIEW" == "false" ]] && NO_REVIEW=true
 
-DEFAULT_REPO_DIR="$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel 2>/dev/null || (cd "$SCRIPT_DIR/.." && pwd))"
-DOTFILES_REPO_DIR="${DOTFILES_REPO_DIR:-$DEFAULT_REPO_DIR}"
 DOTFILES_LOG_DIR="${DOTFILES_LOG_DIR:-$HOME/Library/Logs/dotfiles}"
 DOTFILES_AUTOBACKUP_LOCKFILE="${DOTFILES_AUTOBACKUP_LOCKFILE:-/tmp/dotfiles-autocommit.lock}"
 
@@ -695,6 +712,54 @@ raw = sys.stdin.buffer.read()
 text = raw.decode("utf-8", errors="backslashreplace")
 sys.stdout.buffer.write(text.encode("utf-8"))
 '
+}
+
+# Prints the diff as reviewers see it: a changed-files manifest, with
+# single-line JSON rewrites replaced by structural diffs. Writes the changed
+# paths, one per line, to the second argument.
+prepare_review_input() {
+  local diff="$1"
+  local paths_file="$2"
+  local diff_file input_file status
+
+  diff_file="$(mktemp)"
+  input_file="$(mktemp)"
+  printf '%s' "$diff" > "$diff_file"
+  python3 "$SCRIPT_DIR/review_diff.py" prepare "$diff_file" "$input_file" "$paths_file"
+  status=$?
+  [[ $status -eq 0 ]] && cat "$input_file"
+  rm -f "$diff_file" "$input_file"
+  return "$status"
+}
+
+# Prints the changed paths a review never mentions and fails if there are any.
+review_coverage_gaps() {
+  local changed_paths="$1"
+  local review_file="$2"
+
+  python3 "$SCRIPT_DIR/review_diff.py" coverage <(printf '%s\n' "$changed_paths") "$review_file"
+}
+
+review_coverage_detail() {
+  local missing_paths="$1"
+  local changed_paths="$2"
+  local missing_count total_count listed="" path
+
+  if [[ -z "$missing_paths" ]]; then
+    printf 'coverage check failed'
+    return 0
+  fi
+
+  missing_count="$(printf '%s\n' "$missing_paths" | grep -c .)"
+  total_count="$(printf '%s\n' "$changed_paths" | grep -c .)"
+  while IFS= read -r path; do
+    [[ -n "$path" ]] && listed="${listed:+$listed, }\`$path\`"
+  done < <(printf '%s\n' "$missing_paths" | head -3)
+
+  printf 'omitted %s of %s changed files: %s' "$missing_count" "$total_count" "$listed"
+  if [[ "$missing_count" -gt 3 ]]; then
+    printf ', and %s more' "$((missing_count - 3))"
+  fi
 }
 
 write_pr_body() {
@@ -1306,6 +1371,7 @@ review_pr() {
   local auxiliary_models auxiliary_models_file
   local raw_detail detail normalized_review_file normalization_file normalization_detail
   local diagnostics_body
+  local changed_paths changed_paths_file missing_paths coverage_detail
 
   raw_diff=$(gh pr diff "$pr_number" 2>/dev/null)
   if [[ -z "$raw_diff" ]]; then
@@ -1318,6 +1384,16 @@ review_pr() {
     notify_error "Failed to prepare review input — PR #$pr_number left open" "$pr_url"
     return 1
   fi
+
+  changed_paths_file="$(mktemp)"
+  if ! diff="$(prepare_review_input "$diff" "$changed_paths_file")"; then
+    rm -f "$changed_paths_file"
+    write_pr_body "$pr_number" "**Auto-review failed**: could not build the review input from the PR diff."
+    notify_error "Failed to build review input — PR #$pr_number left open" "$pr_url"
+    return 1
+  fi
+  changed_paths="$(<"$changed_paths_file")"
+  rm -f "$changed_paths_file"
 
   repo_root=$(git rev-parse --show-toplevel 2>/dev/null || printf '%s\n' "$DOTFILES_REPO_DIR")
   prompt_file="$repo_root/.github/review-prompt.md"
@@ -1373,6 +1449,15 @@ review_pr() {
           diagnostics+=("$reviewer_name (\`$model\`): invalid review output, $normalization_detail")
           rm -f "$actual_model_file" "$detail_file" "$auxiliary_models_file" "$normalized_review_file" "$normalized_review_file.raw" "$normalization_file"
           echo "  ↳ $reviewer_name ($model) returned invalid review output, trying next reviewer/model..." >&2
+          continue
+        fi
+
+        if ! missing_paths="$(review_coverage_gaps "$changed_paths" "$normalized_review_file")"; then
+          coverage_detail="$(review_coverage_detail "$missing_paths" "$changed_paths")"
+          attempts+=("$reviewer_name ($model): incomplete review, $coverage_detail")
+          diagnostics+=("$reviewer_name (\`$model\`): incomplete review, $coverage_detail")
+          rm -f "$actual_model_file" "$detail_file" "$auxiliary_models_file" "$normalized_review_file" "$normalized_review_file.raw" "$normalization_file"
+          echo "  ↳ $reviewer_name ($model) left changed files out of its review, trying next reviewer/model..." >&2
           continue
         fi
 
