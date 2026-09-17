@@ -156,6 +156,34 @@ test_missing_local_config_stops_before_backup() {
     fail "missing config error does not provide setup command"
 }
 
+# The default auto-backup/.env is checked before DOTFILES_REPO_DIR is assigned,
+# so on any machine with that secret file, sourcing under `set -u` died with
+# "DOTFILES_REPO_DIR: unbound variable".
+test_default_secret_file_check_does_not_need_repo_dir() {
+  local work_dir script_dir output exit_code
+  work_dir="$(mktemp -d "${TMPDIR:-/tmp}/dotfiles-secret-file-test.XXXXXX")"
+  script_dir="$work_dir/auto-backup"
+  mkdir -p "$script_dir"
+  cp "$SCRIPT_DIR/auto-commit.sh" "$SCRIPT_DIR/config.py" "$SCRIPT_DIR/opencode_go.py" "$script_dir/"
+  write_test_config "$script_dir/config.local.toml"
+  printf 'OPENCODE_GO_API_KEY=test-key\n' > "$script_dir/.env"
+  chmod 600 "$script_dir/.env"
+
+  set +e
+  output="$(
+    env -i \
+      HOME="$HOME" \
+      PATH="$PATH" \
+      DOTFILES_AUTOBACKUP_SOURCE_ONLY=true \
+      /bin/bash -uc 'dir="$1"; shift; source "$dir/auto-commit.sh"' _ "$script_dir" 2>&1
+  )"
+  exit_code=$?
+  set -e
+
+  assert_eq "0" "$exit_code" "sourcing with a default secret file and no DOTFILES_REPO_DIR ($output)"
+  rm -rf "$work_dir"
+}
+
 test_notification_self_test_runs_without_backup_config() {
   local work_dir output exit_code
   work_dir="$(mktemp -d "${TMPDIR:-/tmp}/dotfiles-notification-cli-test.XXXXXX")"
@@ -215,11 +243,13 @@ test_notification_denial_falls_back_to_osascript() {
     printf '%s\n' called > "$fallback_file"
   }
 
+  sleep() { :; }
+
   set +e
   deliver_notification "Backup finished" "" "" 2> "$work_dir/error"
   delivery_exit=$?
   set -e
-  unset -f terminal-notifier osascript
+  unset -f terminal-notifier osascript sleep
 
   assert_eq "0" "$delivery_exit" "notification fallback exit"
   assert_eq "called" "$(<"$fallback_file")" "notification fallback invocation"
@@ -244,17 +274,61 @@ test_notification_failure_is_written_to_stderr() {
     return 1
   }
 
+  sleep() { :; }
+
   set +e
   deliver_notification "Backup finished" "" "" 2> "$work_dir/error"
   delivery_exit=$?
   set -e
-  unset -f terminal-notifier osascript
+  unset -f terminal-notifier osascript sleep
 
   assert_eq "1" "$delivery_exit" "notification delivery failure exit"
   grep -Fq 'macOS notification delivery failed' "$work_dir/error" ||
     fail "notification failure was not written to stderr"
   grep -Fq -- '--test-notification' "$work_dir/error" ||
     fail "notification failure did not provide the self-test command"
+
+  rm -rf "$work_dir"
+}
+
+# PR #288: usernoted rejected the first post while LaunchServices re-registered
+# terminal-notifier.app, so the osascript fallback's click opened Script Editor.
+test_terminal_notifier_retry_keeps_clickable_pr_link() {
+  local work_dir delivery_exit
+  work_dir="$(mktemp -d "${TMPDIR:-/tmp}/dotfiles-notification-retry-test.XXXXXX")"
+
+  terminal-notifier() {
+    printf '%s\n' "$@" >> "$work_dir/terminal-notifier-args"
+    if [[ ! -f "$work_dir/first-attempt" ]]; then
+      : > "$work_dir/first-attempt"
+      printf '%s\n' 'Could not request notification permission: Notifications are not allowed for this application'
+      return 3
+    fi
+  }
+
+  osascript() {
+    cat > /dev/null
+    printf '%s\n' called > "$work_dir/osascript-called"
+  }
+
+  sleep() {
+    printf '%s\n' "$1" > "$work_dir/slept"
+  }
+
+  set +e
+  deliver_notification "Backup finished" "https://github.com/example/repo/pull/288" "" 2> "$work_dir/error"
+  delivery_exit=$?
+  set -e
+  unset -f terminal-notifier osascript sleep
+
+  assert_eq "0" "$delivery_exit" "notification retry exit"
+  [[ ! -f "$work_dir/osascript-called" ]] ||
+    fail "notification fell back to osascript even though the retry succeeded"
+  assert_eq "2" "$(grep -cx -- '-open' "$work_dir/terminal-notifier-args")" "terminal-notifier attempts"
+  grep -Fxq 'https://github.com/example/repo/pull/288' "$work_dir/terminal-notifier-args" ||
+    fail "retried notification lost its PR link"
+  [[ -f "$work_dir/slept" ]] ||
+    fail "terminal-notifier retry did not wait for the app registration to settle"
 
   rm -rf "$work_dir"
 }
@@ -911,7 +985,7 @@ test_review_pr_escapes_invalid_utf8_before_review() {
     local actual_model_file="$6"
     printf '%s' "$diff" > "$captured_diff"
     printf '%s' 'claude-opus-5' > "$actual_model_file"
-    printf '%s\n' 'APPROVED' '' '### Summary' 'Clean backup.'
+    printf '%s\n' 'APPROVED' '' '### Summary' 'Clean backup.' '' '| `history/.zsh_history` | 5/5 | History rotation. |'
   }
 
   write_pr_body() { :; }
@@ -968,7 +1042,7 @@ test_review_pr_skips_remaining_models_after_adapter_failure() {
     fi
 
     printf '%s' 'claude-opus-5' > "$actual_model_file"
-    printf '%s\n' 'APPROVED' '' '### Summary' 'Clean backup.'
+    printf '%s\n' 'APPROVED' '' '### Summary' 'Clean backup.' '' '| `file` | 5/5 | Routine. |'
   }
 
   write_pr_body() { :; }
@@ -1032,6 +1106,8 @@ APPROVED
 
 ### Summary
 Clean backup.
+
+| `file` | 5/5 | Routine. |
 FIXTURE
       return 0
     fi
@@ -1103,6 +1179,8 @@ APPROVED
 
 ### Summary
 Clean backup.
+
+| `file` | 5/5 | Routine. |
 FIXTURE
     return 0
   }
@@ -1155,7 +1233,7 @@ test_review_pr_reports_auxiliary_models_separately() {
     printf '%s' 'claude-opus-5' > "$actual_model_file"
     [[ -n "$auxiliary_models_file" ]] &&
       printf '%s' 'claude-haiku-4-5-20251001' > "$auxiliary_models_file"
-    printf '%s\n' 'APPROVED' '' '### Summary' 'Clean backup.'
+    printf '%s\n' 'APPROVED' '' '### Summary' 'Clean backup.' '' '| `file` | 5/5 | Routine. |'
   }
 
   write_pr_body() {
@@ -1173,14 +1251,156 @@ test_review_pr_reports_auxiliary_models_separately() {
     fail "Claude auxiliary model footer missing"
 }
 
+# PR #288: AGY's pro model reported "5 files reviewed" for a 16-file PR and the
+# backup auto-merged. An incomplete review must fall through to the next model.
+test_review_pr_rejects_reviews_that_omit_changed_files() {
+  local attempts_file review_exit
+  attempts_file="$(mktemp)"
+  LAST_PR_BODY=""
+  LAST_DIAGNOSTICS_COMMENT=""
+
+  gh() {
+    if [[ "$1" == "pr" && "$2" == "diff" ]]; then
+      printf '%s\n' \
+        'diff --git a/apps/terminal/ghostty/config b/apps/terminal/ghostty/config' \
+        '--- a/apps/terminal/ghostty/config' \
+        '+++ b/apps/terminal/ghostty/config' \
+        '@@ -1 +1 @@' \
+        '-font-size = 15' \
+        '+font-size = 15.5' \
+        'diff --git a/macos/defaults.sh b/macos/defaults.sh' \
+        '--- a/macos/defaults.sh' \
+        '+++ b/macos/defaults.sh' \
+        '@@ -1 +1,2 @@' \
+        ' #!/usr/bin/env bash' \
+        '+defaults write com.apple.dock autohide -bool true'
+      return 0
+    fi
+    return 1
+  }
+
+  configured_reviewers() {
+    printf '%s\n' agy
+  }
+
+  models_for_reviewer() {
+    printf '%s\n' gemini-flash gemini-pro
+  }
+
+  run_review_attempt() {
+    local model="$2"
+    printf '%s\n' "$model" >> "$attempts_file"
+
+    if [[ "$model" == "gemini-flash" ]]; then
+      printf '%s\n' 'APPROVED' '' '| `apps/terminal/ghostty/config` | 5/5 | Font size. |' '' '1 files reviewed, 0 comments'
+      return 0
+    fi
+
+    printf '%s\n' 'APPROVED' '' \
+      '| `apps/terminal/ghostty/config` | 5/5 | Font size. |' \
+      '| `macos/defaults.sh` | 5/5 | New Dock default. |' '' '2 files reviewed, 0 comments'
+  }
+
+  write_pr_body() {
+    LAST_PR_BODY="$2"
+  }
+
+  upsert_review_diagnostics_comment() {
+    LAST_DIAGNOSTICS_COMMENT="$2"
+  }
+
+  delete_review_diagnostics_comment() { :; }
+
+  set +e
+  review_pr "288" "https://github.com/example/repo/pull/288" 2>/dev/null
+  review_exit=$?
+  set -e
+
+  assert_eq "0" "$review_exit" "complete fallback review exit"
+  assert_eq "gemini-flash
+gemini-pro" "$(<"$attempts_file")" "incomplete review should fall back to the next model"
+  [[ "$LAST_PR_BODY" == *'Reviewed by **AGY** (model: `gemini-pro`)'* ]] ||
+    fail "PR body does not come from the complete review"
+  [[ "$LAST_DIAGNOSTICS_COMMENT" == *'AGY (`gemini-flash`): incomplete review, omitted 1 of 2 changed files: `macos/defaults.sh`'* ]] ||
+    fail "diagnostics do not name the file the incomplete review omitted"
+
+  rm -f "$attempts_file"
+}
+
+# PRs #277-#288: single-line VS Code extensions.json rewrites made ~570 KB
+# diffs that timed out AGY's flash models.
+test_review_pr_sends_structural_json_diff_to_reviewers() {
+  local captured_diff review_exit
+  captured_diff="$(mktemp)"
+
+  gh() {
+    if [[ "$1" == "pr" && "$2" == "diff" ]]; then
+      python3 - <<'PY'
+import json
+
+path = "apps/editors/vscode/profiles/5a14b135/extensions.json"
+
+def profile(version):
+    entries = [{"identifier": {"id": f"filler.ext-{index}"}, "version": "1.0.0"} for index in range(200)]
+    return entries + [{"identifier": {"id": "tldraw-org.tldraw-vscode"}, "version": version}]
+
+print(f"diff --git a/{path} b/{path}")
+print(f"--- a/{path}")
+print(f"+++ b/{path}")
+print("@@ -1 +1 @@")
+print("-" + json.dumps(profile("2.352.0")))
+print("+" + json.dumps(profile("2.353.0")))
+PY
+      return 0
+    fi
+    return 1
+  }
+
+  configured_reviewers() {
+    printf '%s\n' agy
+  }
+
+  models_for_reviewer() {
+    printf '%s\n' gemini-flash
+  }
+
+  run_review_attempt() {
+    local diff="$4"
+    printf '%s' "$diff" > "$captured_diff"
+    printf '%s\n' 'APPROVED' '' '| `apps/editors/vscode/profiles/*/extensions.json` | 5/5 | Extension update. |'
+  }
+
+  write_pr_body() { :; }
+  upsert_review_diagnostics_comment() { :; }
+  delete_review_diagnostics_comment() { :; }
+
+  set +e
+  review_pr "288" "https://github.com/example/repo/pull/288"
+  review_exit=$?
+  set -e
+
+  assert_eq "0" "$review_exit" "structural diff review exit"
+  grep -Fq '# Changed files (1)' "$captured_diff" ||
+    fail "review input has no changed-files manifest"
+  grep -Fq '~ $[identifier.id="tldraw-org.tldraw-vscode"].version: "2.352.0" -> "2.353.0"' "$captured_diff" ||
+    fail "review input does not list the changed extension version"
+  if grep -Fq 'filler.ext-0' "$captured_diff"; then
+    fail "raw single-line JSON reached the reviewer"
+  fi
+
+  rm -f "$captured_diff"
+}
+
 source_helpers
 
 test_toml_config_loader_validates_and_flattens_settings
 test_missing_local_config_stops_before_backup
+test_default_secret_file_check_does_not_need_repo_dir
 test_notification_self_test_runs_without_backup_config
 test_setup_notification_click_copies_command
 test_notification_denial_falls_back_to_osascript
 test_notification_failure_is_written_to_stderr
+test_terminal_notifier_retry_keeps_clickable_pr_link
 test_deprecated_reviewer_flag_notifies_and_copies_migration_command
 test_reviewer_flags_are_rejected_with_migration_guidance
 test_install_requires_valid_local_config_before_side_effects
@@ -1211,5 +1431,7 @@ test_review_pr_skips_remaining_models_after_adapter_failure
 test_review_pr_falls_back_and_writes_diagnostics
 test_review_pr_deletes_stale_diagnostics_on_clean_success
 test_review_pr_reports_auxiliary_models_separately
+test_review_pr_rejects_reviews_that_omit_changed_files
+test_review_pr_sends_structural_json_diff_to_reviewers
 
 printf 'ok - auto-review helper tests passed\n'

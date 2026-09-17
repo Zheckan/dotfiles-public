@@ -40,6 +40,18 @@ files, or unexpected deletions. Everything else is normal backup behavior.
 - `macos/` — System defaults
 - `fonts/` — Font configurations
 
+## Review input
+
+The input starts with a `# Changed files (N)` manifest that lists every file in the
+PR, followed by the diff.
+
+Some apps store a whole JSON document on one line (VS Code profile `extensions.json`
+files are ~70k characters), so changing one value rewrites the entire line. For those
+files the raw hunk is replaced by a `structural JSON diff` block that lists every added
+(`+`), removed (`-`), and changed (`~`) value by its JSON path. Both versions were
+parsed as valid JSON before the block was generated. Treat the block as the complete
+change for that file; anything it does not list is unchanged.
+
 ## What to check
 
 ### Critical (must block merge)
@@ -104,6 +116,11 @@ Rate your confidence in this review on a 1–5 scale, then explain in 1–2 sent
 | (path)   | X/5   | Brief description of changes and risk assessment |
 
 X files reviewed, N comments
+
+The table must account for every path in the changed-files manifest. List each path,
+or group related files under a glob such as `apps/editors/vscode/profiles/*/extensions.json`,
+and put each path or glob in backticks. Set X to the manifest's file count. A review
+that leaves out a changed file is rejected and retried with another model.
 
 ### Potential risks
 Any warnings from the list above. Say "None identified." if clean.
