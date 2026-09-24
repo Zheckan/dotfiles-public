@@ -46,6 +46,7 @@ run_backup "Misc — Conda"          "$DOTFILES_DIR/languages/python/conda/backu
 run_backup "Misc — Yarn"           "$DOTFILES_DIR/languages/node/yarn/backup.sh"
 run_backup "Misc — mactop"         "$DOTFILES_DIR/cli/misc/mactop/backup.sh"
 run_backup "MultiViewer for F1"   "$DOTFILES_DIR/apps/multiviewer/backup.sh"
+run_backup "Raycast"               "$DOTFILES_DIR/apps/raycast/backup.sh"
 run_backup "macOS Defaults"        "$DOTFILES_DIR/macos/backup.sh"
 run_backup "History"               "$DOTFILES_DIR/history/backup.sh"
 

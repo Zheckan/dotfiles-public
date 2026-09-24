@@ -17,6 +17,7 @@ fi
 
 # ── App-specific config restore ────────────────────────────────────
 "$DOTFILES_DIR/apps/multiviewer/install.sh"
+"$DOTFILES_DIR/apps/raycast/install.sh"
 
 # Manual steps after install
 log_manual "Sign into Mac App Store apps (Goodnotes, Xcode, etc.)"

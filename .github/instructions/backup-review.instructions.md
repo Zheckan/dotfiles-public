@@ -1,5 +1,5 @@
 ---
-applyTo: "history/**,apps/Brewfile,apps/editors/**,apps/ai-tools/**,apps/multiviewer/**,apps/terminal/**,cli/shell/**,cli/git/**,cli/ssh/**,cli/misc/**,languages/**,macos/**,fonts/**"
+applyTo: "history/**,apps/Brewfile,apps/editors/**,apps/ai-tools/**,apps/multiviewer/**,apps/raycast/**,apps/terminal/**,cli/shell/**,cli/git/**,cli/ssh/**,cli/misc/**,languages/**,macos/**,fonts/**"
 ---
 
 Follow the review instructions in `.github/review-prompt.md`.

@@ -29,6 +29,7 @@ files, or unexpected deletions. Everything else is normal backup behavior.
 - `apps/editors/` — Cursor, VS Code, Zed settings and extensions
 - `apps/ai-tools/` — Claude, Codex, Gemini, OpenCode configs
 - `apps/multiviewer/` — F1 MultiViewer display layouts and settings
+- `apps/raycast/` — Raycast settings export (`Raycast.rayconfig`, binary, password-protected)
 - `apps/terminal/` — Ghostty terminal config
 - `cli/shell/` — Zsh, Oh My Zsh, aliases, .zshrc
 - `cli/git/` — .gitconfig, .gitignore_global
