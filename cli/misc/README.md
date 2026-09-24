@@ -23,9 +23,8 @@ Manages configuration for various smaller tools.
 | `conda/` | `.condarc` | `~/.condarc` |
 | `yarn/` | `.yarnrc.yml` | `~/.yarnrc.yml` |
 | `mactop/` | `config.json` | `~/.mactop/config.json` |
-| `raycast/` | -- | Managed via Raycast UI (see `raycast/README.md`) |
 
 ## Manual Steps
 
 - **gh CLI**: Run `gh auth login` to authenticate after install.
-- **Raycast**: Use the built-in export/import feature. See `raycast/README.md`.
+- **Raycast**: Backed up from its scheduled export. See `apps/raycast/README.md`.
