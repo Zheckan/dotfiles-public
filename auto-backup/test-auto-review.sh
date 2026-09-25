@@ -1391,6 +1391,407 @@ PY
   rm -f "$captured_diff"
 }
 
+# PR #291: claude.ai skill sync wrote 209 vendored files into a backed-up
+# directory, so `gh pr diff` answered HTTP 406 and the review dead-ended.
+test_review_pr_falls_back_to_git_when_the_api_refuses_the_diff() {
+  local captured_diff review_exit
+  captured_diff="$(mktemp)"
+
+  gh() {
+    if [[ "$1" == "pr" && "$2" == "diff" ]]; then
+      return 1
+    fi
+    if [[ "$1" == "pr" && "$2" == "view" ]]; then
+      printf 'main feature/review-head\n'
+      return 0
+    fi
+    return 1
+  }
+
+  git() {
+    if [[ "$1" == "diff" ]]; then
+      printf 'diff --git a/cli/git/.gitconfig b/cli/git/.gitconfig\n'
+      printf -- '--- a/cli/git/.gitconfig\n+++ b/cli/git/.gitconfig\n'
+      printf '@@ -1 +1 @@\n-editor = vim\n+editor = nano\n'
+      return 0
+    fi
+    command git "$@"
+  }
+
+  configured_reviewers() { printf '%s\n' agy; }
+  models_for_reviewer() { printf '%s\n' gemini-flash; }
+
+  run_review_attempt() {
+    local diff="$4"
+    printf '%s' "$diff" > "$captured_diff"
+    printf '%s\n' 'APPROVED' '' '| `cli/git/.gitconfig` | 5/5 | Editor change. |'
+  }
+
+  write_pr_body() { :; }
+  upsert_review_diagnostics_comment() { :; }
+  delete_review_diagnostics_comment() { :; }
+
+  set +e
+  review_pr "291" "https://github.com/example/repo/pull/291"
+  review_exit=$?
+  set -e
+
+  assert_eq "0" "$review_exit" "git fallback review exit"
+  grep -Fq '# Changed files (1)' "$captured_diff" ||
+    fail "git fallback diff never reached the reviewer"
+  grep -Fq '+editor = nano' "$captured_diff" ||
+    fail "git fallback diff lost its body"
+
+  unset -f git
+  rm -f "$captured_diff"
+}
+
+test_review_pr_requests_changes_when_the_diff_is_too_large() {
+  local body_file review_exit reviewer_ran
+  body_file="$(mktemp)"
+  reviewer_ran="$(mktemp)"
+
+  gh() {
+    if [[ "$1" == "pr" && "$2" == "diff" ]]; then
+      python3 - <<'PY'
+for index in range(4000):
+    path = f"apps/ai-tools/claude/skills/synced/bucket/skill-{index}/SKILL.md"
+    print(f"diff --git a/{path} b/{path}")
+    print("new file mode 100644")
+    print("--- /dev/null")
+    print(f"+++ b/{path}")
+    print("@@ -0,0 +1,3 @@")
+    print("+one")
+    print("+two")
+    print("+three")
+PY
+      return 0
+    fi
+    return 1
+  }
+
+  configured_reviewers() { printf '%s\n' agy; }
+  models_for_reviewer() { printf '%s\n' gemini-flash; }
+
+  run_review_attempt() {
+    printf 'ran' > "$reviewer_ran"
+    printf '%s\n' 'APPROVED'
+  }
+
+  write_pr_body() { printf '%s' "$2" > "$body_file"; }
+  upsert_review_diagnostics_comment() { :; }
+  delete_review_diagnostics_comment() { :; }
+
+  set +e
+  review_pr "291" "https://github.com/example/repo/pull/291"
+  review_exit=$?
+  set -e
+
+  assert_eq "1" "$review_exit" "oversized diff review exit"
+  [[ -s "$reviewer_ran" ]] && fail "a reviewer was run on an oversized diff"
+  head -1 "$body_file" | grep -Fqx 'CHANGES_REQUESTED' ||
+    fail "oversized diff did not request changes"
+  grep -Fq 'skills/synced/bucket/skill-3999/SKILL.md' "$body_file" ||
+    fail "oversized diff body dropped the changed-files manifest"
+  grep -Fq '+one' "$body_file" &&
+    fail "oversized diff body included the diff content"
+
+  rm -f "$body_file" "$reviewer_ran"
+}
+
+# Answers with a table row per file in the batch it was given, so the coverage
+# check holds each batch to its own manifest.
+batched_reviewer_stub() {
+  local diff="$1" verdict="$2" score="$3" issues="$4" paths
+  paths="$(printf '%s\n' "$diff" | sed -n 's/^- A \([^ ]*\) .*$/\1/p')"
+  printf '%s\n\n%s\n%s\n\n%s\n%s\n\n%s\n\n' \
+    "$verdict" '### Summary' 'Batch reviewed.' \
+    "### Confidence Score: $score/5" 'Routine.' '### Important Files Changed'
+  printf '%s\n%s\n' '| Filename | Score | Overview |' '|----------|-------|----------|'
+  printf '%s\n' "$paths" | while IFS= read -r path; do
+    [[ -n "$path" ]] && printf '| `%s` | %s/5 | New profile. |\n' "$path" "$score"
+  done
+  printf '\n%s files reviewed, 0 comments\n\n' "$(printf '%s\n' "$paths" | grep -c .)"
+  printf '%s\n%s\n\n%s\n%s\n' \
+    '### Potential risks' 'None identified.' '### Issues' "$issues"
+}
+
+many_profiles_diff() {
+  python3 - <<'PY'
+for index in range(300):
+    path = f"apps/editors/vscode/profiles/p{index}/settings.json"
+    print(f"diff --git a/{path} b/{path}")
+    print("new file mode 100644")
+    print("--- /dev/null")
+    print(f"+++ b/{path}")
+    print("@@ -0,0 +1,3 @@")
+    print("+one")
+    print("+two")
+    print("+three")
+PY
+}
+
+test_review_pr_reviews_a_large_diff_in_batches_and_merges_the_result() {
+  local body_file calls review_exit
+  body_file="$(mktemp)"
+  calls="$(mktemp)"
+  printf '0' > "$calls"
+
+  gh() {
+    if [[ "$1" == "pr" && "$2" == "diff" ]]; then
+      many_profiles_diff
+      return 0
+    fi
+    return 1
+  }
+
+  configured_reviewers() { printf '%s\n' agy; }
+  models_for_reviewer() { printf '%s\n' gemini-flash; }
+
+  run_review_attempt() {
+    printf '%s' "$(($(cat "$calls") + 1))" > "$calls"
+    batched_reviewer_stub "$4" 'APPROVED' 5 'None identified.'
+  }
+
+  write_pr_body() { printf '%s' "$2" > "$body_file"; }
+  upsert_review_diagnostics_comment() { :; }
+  delete_review_diagnostics_comment() { :; }
+
+  set +e
+  review_pr "292" "https://github.com/example/repo/pull/292"
+  review_exit=$?
+  set -e
+
+  assert_eq "0" "$review_exit" "batched review exit"
+  [[ "$(cat "$calls")" -gt 1 ]] ||
+    fail "large diff was not split across multiple reviewer calls"
+  head -1 "$body_file" | grep -Fqx 'APPROVED' ||
+    fail "merged review lost its verdict"
+  grep -Fq '300 files reviewed' "$body_file" ||
+    fail "merged review did not sum the per-batch file tallies"
+  grep -Fq 'apps/editors/vscode/profiles/p0/settings.json' "$body_file" ||
+    fail "merged review dropped the first batch"
+  grep -Fq 'apps/editors/vscode/profiles/p299/settings.json' "$body_file" ||
+    fail "merged review dropped the last batch"
+
+  rm -f "$body_file" "$calls"
+}
+
+test_review_pr_blocks_when_any_batch_requests_changes() {
+  local body_file review_exit
+  body_file="$(mktemp)"
+
+  gh() {
+    if [[ "$1" == "pr" && "$2" == "diff" ]]; then
+      many_profiles_diff
+      return 0
+    fi
+    return 1
+  }
+
+  configured_reviewers() { printf '%s\n' agy; }
+  models_for_reviewer() { printf '%s\n' gemini-flash; }
+
+  # Only the batch holding the last file objects; it must still decide the PR.
+  run_review_attempt() {
+    if [[ "$4" == *'p299/settings.json'* ]]; then
+      batched_reviewer_stub "$4" 'CHANGES_REQUESTED' 2 'Suspicious profile.'
+    else
+      batched_reviewer_stub "$4" 'APPROVED' 5 'None identified.'
+    fi
+  }
+
+  write_pr_body() { printf '%s' "$2" > "$body_file"; }
+  upsert_review_diagnostics_comment() { :; }
+  delete_review_diagnostics_comment() { :; }
+
+  set +e
+  review_pr "292" "https://github.com/example/repo/pull/292"
+  review_exit=$?
+  set -e
+
+  assert_eq "1" "$review_exit" "batched review with an objection exit"
+  head -1 "$body_file" | grep -Fqx 'CHANGES_REQUESTED' ||
+    fail "an objecting batch did not decide the merged verdict"
+  grep -Fq 'Suspicious profile.' "$body_file" ||
+    fail "merged review dropped the objecting batch's issue"
+  grep -Fq '### Confidence Score: 2/5' "$body_file" ||
+    fail "merged review did not take the lowest confidence score"
+
+  rm -f "$body_file"
+}
+
+test_main_pc_waits_for_queued_auto_merge_before_syncing_device_branch() {
+  local calls merge_status
+  calls="$(mktemp)"
+
+  gh() {
+    case "$1 $2" in
+      "pr merge")
+        printf 'gh %s\n' "$*" >> "$calls"
+        [[ "$3" == "291" && "$4" == "--auto" && "$5" == "--squash" ]]
+        ;;
+      "pr view")
+        printf 'OPEN\n'
+        ;;
+      "pr checks") return 8 ;;
+      *) return 1 ;;
+    esac
+  }
+  git() { printf 'git %s\n' "$*" >> "$calls"; }
+
+  set +e
+  merge_reviewed_pr "291" "device/examplehost/user" 0
+  merge_status=$?
+  set -e
+
+  assert_eq "2" "$merge_status" "queued auto-merge status"
+  assert_eq "gh pr merge 291 --auto --squash" "$(<"$calls")" \
+    "queued auto-merge must not reset or push the device branch"
+
+  unset -f gh git
+  rm -f "$calls"
+}
+
+test_main_pc_syncs_device_branch_after_confirmed_merge() {
+  local calls
+  calls="$(mktemp)"
+
+  gh() {
+    printf 'gh %s\n' "$*" >> "$calls"
+    case "$1 $2" in
+      "pr merge") return 0 ;;
+      "pr view") printf 'MERGED\n' ;;
+      "pr checks")
+        printf 'Export, scan, and check syntax\tpass\n'
+        printf 'Check syntax and backup wiring\tpass\n'
+        printf 'Test private tree\tpass\n'
+        printf 'Test exported tree\tpass\n'
+        ;;
+      *) return 1 ;;
+    esac
+  }
+  git() { printf 'git %s\n' "$*" >> "$calls"; }
+
+  merge_reviewed_pr "291" "device/examplehost/user"
+
+  assert_eq "$(cat <<'EXPECTED'
+gh pr merge 291 --auto --squash
+gh pr view 291 --json state --jq .state
+gh pr checks 291 --json name,bucket --jq .[] | [.name,.bucket] | @tsv
+git fetch origin main
+git reset --hard origin/main
+git push -f origin device/examplehost/user
+EXPECTED
+)" "$(<"$calls")" "confirmed merge sync order"
+
+  unset -f gh git
+  rm -f "$calls"
+}
+
+test_main_pc_reports_failed_checks_without_syncing_device_branch() {
+  local calls merge_status
+  calls="$(mktemp)"
+
+  gh() {
+    printf 'gh %s\n' "$*" >> "$calls"
+    case "$1 $2" in
+      "pr merge") return 0 ;;
+      "pr view") printf 'OPEN\n' ;;
+      "pr checks") printf 'Test private tree\tfail\n'; return 1 ;;
+      *) return 1 ;;
+    esac
+  }
+  git() { printf 'git %s\n' "$*" >> "$calls"; }
+
+  set +e
+  merge_reviewed_pr "291" "device/examplehost/user" 5
+  merge_status=$?
+  set -e
+
+  assert_eq "3" "$merge_status" "failed checks status"
+  [[ "$(<"$calls")" != *"git "* ]] ||
+    fail "failed checks must not reset or push the device branch"
+
+  unset -f gh git
+  rm -f "$calls"
+}
+
+test_main_pc_waits_for_checks_then_syncs_after_merge() {
+  local calls
+  calls="$(mktemp)"
+
+  gh() {
+    printf 'gh %s\n' "$*" >> "$calls"
+    case "$1 $2" in
+      "pr merge") return 0 ;;
+      "pr view")
+        [[ "$(awk '/^gh pr view/{n++} END{print n+0}' "$calls")" -eq 1 ]] &&
+          printf 'OPEN\n' || printf 'MERGED\n'
+        ;;
+      "pr checks")
+        if [[ "$(awk '/^gh pr checks/{n++} END{print n+0}' "$calls")" -eq 1 ]]; then
+          printf 'Test private tree\tpending\n'
+          return 8
+        fi
+        printf 'Export, scan, and check syntax\tpass\n'
+        printf 'Check syntax and backup wiring\tpass\n'
+        printf 'Test private tree\tpass\n'
+        printf 'Test exported tree\tpass\n'
+        ;;
+      *) return 1 ;;
+    esac
+  }
+  git() { printf 'git %s\n' "$*" >> "$calls"; }
+  sleep() { :; }
+
+  merge_reviewed_pr "291" "device/examplehost/user" 5
+
+  [[ "$(<"$calls")" == *"gh pr checks 291 --json name,bucket --jq .[] | [.name,.bucket] | @tsv"* ]] ||
+    fail "queued merge did not check CI status"
+  [[ "$(<"$calls")" == *"git push -f origin device/examplehost/user"* ]] ||
+    fail "merged PR did not sync the device branch"
+
+  unset -f gh git sleep
+  rm -f "$calls"
+}
+
+test_main_pc_catches_check_failure_after_early_merge() {
+  local calls merge_status
+  calls="$(mktemp)"
+
+  gh() {
+    printf 'gh %s\n' "$*" >> "$calls"
+    case "$1 $2" in
+      "pr merge") return 0 ;;
+      "pr view") printf 'MERGED\n' ;;
+      "pr checks")
+        if [[ "$(awk '/^gh pr checks/{n++} END{print n+0}' "$calls")" -eq 1 ]]; then
+          printf 'Test private tree\tpending\n'
+          return 8
+        fi
+        printf 'Test private tree\tfail\n'
+        return 1
+        ;;
+      *) return 1 ;;
+    esac
+  }
+  git() { printf 'git %s\n' "$*" >> "$calls"; }
+  sleep() { :; }
+
+  set +e
+  merge_reviewed_pr "291" "device/examplehost/user" 5
+  merge_status=$?
+  set -e
+
+  assert_eq "4" "$merge_status" "CI failure after early merge"
+  [[ "$(<"$calls")" != *"git "* ]] ||
+    fail "CI failure after early merge must not reset or push the device branch"
+
+  unset -f gh git sleep
+  rm -f "$calls"
+}
+
 source_helpers
 
 test_toml_config_loader_validates_and_flattens_settings
@@ -1433,5 +1834,14 @@ test_review_pr_deletes_stale_diagnostics_on_clean_success
 test_review_pr_reports_auxiliary_models_separately
 test_review_pr_rejects_reviews_that_omit_changed_files
 test_review_pr_sends_structural_json_diff_to_reviewers
+test_review_pr_falls_back_to_git_when_the_api_refuses_the_diff
+test_review_pr_requests_changes_when_the_diff_is_too_large
+test_review_pr_reviews_a_large_diff_in_batches_and_merges_the_result
+test_review_pr_blocks_when_any_batch_requests_changes
+test_main_pc_waits_for_queued_auto_merge_before_syncing_device_branch
+test_main_pc_syncs_device_branch_after_confirmed_merge
+test_main_pc_reports_failed_checks_without_syncing_device_branch
+test_main_pc_waits_for_checks_then_syncs_after_merge
+test_main_pc_catches_check_failure_after_early_merge
 
 printf 'ok - auto-review helper tests passed\n'

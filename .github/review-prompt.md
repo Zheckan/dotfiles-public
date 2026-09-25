@@ -46,6 +46,12 @@ files, or unexpected deletions. Everything else is normal backup behavior.
 The input starts with a `# Changed files (N)` manifest that lists every file in the
 PR, followed by the diff.
 
+A large PR is split into batches, and you may be reviewing one of them. A batch starts
+with `# Batch I of N` and a `# Whole PR` summary counting changed and new files per
+directory across every batch. Your manifest and file table cover only your batch, but
+judge whole-PR patterns from the summary: if it shows a synced third-party tree (see
+below), return `CHANGES_REQUESTED` even when the files in your batch look harmless.
+
 Some apps store a whole JSON document on one line (VS Code profile `extensions.json`
 files are ~70k characters), so changing one value rewrites the entire line. For those
 files the raw hunk is replaced by a `structural JSON diff` block that lists every added
@@ -68,6 +74,36 @@ change for that file; anything it does not list is unchanged.
   `apps/Brewfile` can mean the backup ran against the wrong Node/npm environment,
   not that every global package was intentionally uninstalled. Treat this as an
   unexpected deletion and **must return `CHANGES_REQUESTED`** for human review.
+
+### Known pattern: synced third-party trees
+
+A tool can write content into a backed-up directory without anyone enabling it,
+and the backup then commits it. This has happened, so treat it as a known
+pattern rather than a surprise.
+
+**What it looked like (PR #291, September 2026).** Anthropic enabled claude.ai
+skill sync server-side. Claude Code created `~/.claude/skills/synced/` and
+downloaded ten skills into it. The next backup swept all of it in: 209 of 213
+changed files, 79,387 insertions, including three identical copies of the
+ISO-IEC 29500 OOXML schema bundle. The diff was large enough that the GitHub API
+refused to serve it.
+
+**How to recognize it.** A large number of new files appear under a single
+directory that has not been seen in previous backups, and their content is
+clearly vendored — third-party schemas, bundled scripts, or documentation the
+user did not write. Duplicate copies of the same large file under sibling
+directories are a strong signal.
+
+Return `CHANGES_REQUESTED`. Nothing here is dangerous on its own — the content is
+usually benign and re-downloadable — but a backup module needs an exclusion, and
+merging first means the repo carries the tree until someone notices.
+
+**The reverse case is expected.** Once such a directory is excluded, the same
+files disappear in bulk on the next backup. A mass deletion confined to a
+vendored tree like `skills/synced/` or `plugins/synced/` is the cleanup working,
+not data loss. Say so in the summary and do not block on it. This is the
+exception to the deletion rules above, which concern configuration the user
+authored or package manifests that exist nowhere else.
 
 ### Warnings (flag in summary, use judgment on verdict)
 
