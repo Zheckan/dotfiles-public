@@ -282,7 +282,7 @@ DOTFILES_REVIEW_OPENCODE_REASONING="${DOTFILES_REVIEW_OPENCODE_REASONING:-}"
 DOTFILES_REVIEW_OPENCODE_GO_API_REASONING="${DOTFILES_REVIEW_OPENCODE_GO_API_REASONING:-}"
 
 # ── Flags ─────────────────────────────────────────────────────────
-# --main-pc    : Full flow — rebase, backup, review, PR, merge
+# --main-pc    : Full flow — rebase, backup, review, PR, request auto-merge
 # --pr-only    : Same as --main-pc but without merge
 # --no-rebase  : Skip rebase on main (combinable with above)
 # --no-review  : Skip AI review (combinable with above)
@@ -453,6 +453,7 @@ github_url() {
 # ── Notifications (macOS) ─────────────────────────────────────────
 # Usage: notify_error "message" ["url"]
 # Usage: notify_success "message" ["url"]
+# Usage: notify_pending "message" ["url"]
 notify_error() {
   local msg="$1" url="${2:-}"
   deliver_notification "$msg" "$url" "Basso" || true
@@ -460,6 +461,11 @@ notify_error() {
 }
 
 notify_success() {
+  local msg="$1" url="${2:-}"
+  deliver_notification "$msg" "$url" "" || true
+}
+
+notify_pending() {
   local msg="$1" url="${2:-}"
   deliver_notification "$msg" "$url" "" || true
 }
@@ -714,21 +720,57 @@ sys.stdout.buffer.write(text.encode("utf-8"))
 '
 }
 
-# Prints the diff as reviewers see it: a changed-files manifest, with
-# single-line JSON rewrites replaced by structural diffs. Writes the changed
-# paths, one per line, to the second argument.
-prepare_review_input() {
+# Prints the PR diff, falling back to git when the API will not serve it.
+# `gh pr diff` answers HTTP 406 above 20,000 lines, which is exactly the case a
+# review most needs to see, so fall back to the local refs the backup just
+# pushed. Three-dot matches what the PR shows: changes on the head branch only.
+fetch_pr_diff() {
+  local pr_number="$1"
+  local diff base head
+
+  diff=$(gh pr diff "$pr_number" 2>/dev/null)
+  if [[ -n "$diff" ]]; then
+    printf '%s' "$diff"
+    return 0
+  fi
+
+  read -r base head < <(
+    gh pr view "$pr_number" --json baseRefName,headRefName \
+      --jq '.baseRefName + " " + .headRefName' 2>/dev/null
+  ) || return 1
+  [[ -n "$base" && -n "$head" ]] || return 1
+
+  git fetch --quiet origin "$base" "$head" 2>/dev/null || true
+  git diff --no-color "origin/$base...origin/$head" 2>/dev/null
+}
+
+# Splits the diff into per-batch input/paths files under the given directory and
+# prints how many were written. Returns 3 when the diff was too large to review.
+review_batches() {
   local diff="$1"
-  local paths_file="$2"
-  local diff_file input_file status
+  local batch_dir="$2"
+  local diff_file status
 
   diff_file="$(mktemp)"
-  input_file="$(mktemp)"
   printf '%s' "$diff" > "$diff_file"
-  python3 "$SCRIPT_DIR/review_diff.py" prepare "$diff_file" "$input_file" "$paths_file"
+  python3 "$SCRIPT_DIR/review_diff.py" split "$diff_file" "$batch_dir"
   status=$?
-  [[ $status -eq 0 ]] && cat "$input_file"
-  rm -f "$diff_file" "$input_file"
+  rm -f "$diff_file"
+  return "$status"
+}
+
+# Prints one review body combining the per-batch reviews.
+merge_batch_reviews() {
+  local files=() review file status
+
+  for review in "$@"; do
+    file="$(mktemp)"
+    printf '%s' "$review" > "$file"
+    files+=("$file")
+  done
+  python3 "$SCRIPT_DIR/review_diff.py" merge "${files[@]}"
+  status=$?
+  rm -f "${files[@]}"
   return "$status"
 }
 
@@ -1359,21 +1401,22 @@ run_review_attempt() {
 review_pr() {
   local pr_number="$1"
   local pr_url="$2"
-  local raw_diff diff repo_root prompt_file raw_prompt prompt
-  local reviewers=()
-  local models=()
-  local attempts=()
-  local diagnostics=()
-  local normalizations=()
-  local reviewer model reasoning review try_output try_exit verdict
-  local model_index
-  local reviewer_name reviewer_link footer actual_model actual_model_file detail_file
-  local auxiliary_models auxiliary_models_file
-  local raw_detail detail normalized_review_file normalization_file normalization_detail
-  local diagnostics_body
-  local changed_paths changed_paths_file missing_paths coverage_detail
+  local raw_diff diff repo_root prompt_file raw_prompt prompt review verdict
+  local diagnostics_body manifest
+  local batch_dir batch_count batch_index batch_input batch_paths
+  local batch_reviews=()
 
-  raw_diff=$(gh pr diff "$pr_number" 2>/dev/null)
+  REVIEW_ATTEMPTS=()
+  REVIEW_DIAGNOSTICS=()
+  REVIEW_NORMALIZATIONS=()
+  REVIEW_TEXT=""
+  REVIEW_FOOTER=""
+  REVIEW_REVIEWER_NAME=""
+  REVIEW_MODEL=""
+  REVIEW_ACTUAL_MODEL=""
+  REVIEW_AUX_MODELS=""
+
+  raw_diff=$(fetch_pr_diff "$pr_number")
   if [[ -z "$raw_diff" ]]; then
     write_pr_body "$pr_number" "**Auto-review failed**: could not retrieve PR diff."
     notify_error "Failed to get PR diff — PR #$pr_number left open" "$pr_url"
@@ -1385,15 +1428,45 @@ review_pr() {
     return 1
   fi
 
-  changed_paths_file="$(mktemp)"
-  if ! diff="$(prepare_review_input "$diff" "$changed_paths_file")"; then
-    rm -f "$changed_paths_file"
-    write_pr_body "$pr_number" "**Auto-review failed**: could not build the review input from the PR diff."
-    notify_error "Failed to build review input — PR #$pr_number left open" "$pr_url"
-    return 1
-  fi
-  changed_paths="$(<"$changed_paths_file")"
-  rm -f "$changed_paths_file"
+  batch_dir="$(mktemp -d)"
+  batch_count="$(review_batches "$diff" "$batch_dir")"
+  case $? in
+    0) ;;
+    3)
+      # Too large to review even in batches: no model sees a diff it can only
+      # partly read, so report the manifest and hand it to a human.
+      manifest="$(cat "$batch_dir/batch-001.input" 2>/dev/null)"
+      rm -rf "$batch_dir"
+      write_pr_body "$pr_number" "CHANGES_REQUESTED
+
+### Summary
+This backup is too large to review automatically, so no reviewer was run.
+A backup this size usually means a tool wrote a vendored or synced tree into a
+backed-up directory rather than that you changed this much configuration.
+
+### Confidence Score: 1/5
+Not reviewed — the diff exceeded the review size limit.
+
+### Important Files Changed
+
+$manifest
+
+### Potential risks
+Unreviewed. Check the manifest above for a directory that should not be backed
+up, then either exclude it and re-run the backup, or review and merge by hand.
+
+### Issues
+Diff too large for automated review."
+      notify_error "Diff too large to review — PR #$pr_number left open" "$pr_url"
+      return 1
+      ;;
+    *)
+      rm -rf "$batch_dir"
+      write_pr_body "$pr_number" "**Auto-review failed**: could not build the review input from the PR diff."
+      notify_error "Failed to build review input — PR #$pr_number left open" "$pr_url"
+      return 1
+      ;;
+  esac
 
   repo_root=$(git rev-parse --show-toplevel 2>/dev/null || printf '%s\n' "$DOTFILES_REPO_DIR")
   prompt_file="$repo_root/.github/review-prompt.md"
@@ -1409,6 +1482,105 @@ review_pr() {
     notify_error "Failed to prepare review policy — PR #$pr_number left open" "$pr_url"
     return 1
   fi
+
+  [[ "$batch_count" =~ ^[0-9]+$ ]] || batch_count=1
+  if [[ "$batch_count" -gt 1 ]]; then
+    echo "  ↳ diff split into $batch_count batches so every file is read..." >&2
+  fi
+
+  batch_index=0
+  while [[ $batch_index -lt $batch_count ]]; do
+    batch_index=$((batch_index + 1))
+    batch_input="$(printf '%s/batch-%03d.input' "$batch_dir" "$batch_index")"
+    batch_paths="$(printf '%s/batch-%03d.paths' "$batch_dir" "$batch_index")"
+    [[ -f "$batch_input" ]] || break
+    if [[ "$batch_count" -gt 1 ]]; then
+      echo "  ↳ batch $batch_index of $batch_count..." >&2
+    fi
+    if ! review_one_batch "$(<"$batch_input")" "$(<"$batch_paths")" "$prompt" "$repo_root"; then
+      rm -rf "$batch_dir"
+      review_failure_body "$pr_number" "$pr_url"
+      return 1
+    fi
+    batch_reviews+=("$REVIEW_TEXT")
+  done
+  rm -rf "$batch_dir"
+
+  review="$(merge_batch_reviews "${batch_reviews[@]}")"
+  verdict="$(printf '%s\n' "$review" | first_review_line)"
+
+  write_pr_body "$pr_number" "$review
+
+---
+$REVIEW_FOOTER"
+
+  if [[ "${#REVIEW_DIAGNOSTICS[@]}" -gt 0 || "${#REVIEW_NORMALIZATIONS[@]}" -gt 0 ]]; then
+    diagnostics_body="$(build_review_diagnostics_body \
+      "$REVIEW_REVIEWER_NAME" \
+      "$REVIEW_MODEL" \
+      "$REVIEW_ACTUAL_MODEL" \
+      "$(lines_from_array "${REVIEW_DIAGNOSTICS[@]}")" \
+      "$(lines_from_array "${REVIEW_NORMALIZATIONS[@]}")" \
+      "$REVIEW_AUX_MODELS")"
+    upsert_review_diagnostics_comment "$pr_number" "$diagnostics_body"
+  else
+    delete_review_diagnostics_comment "$pr_number"
+  fi
+
+  if [[ "$verdict" == "APPROVED" ]]; then
+    return 0
+  fi
+
+  notify_error "PR #$pr_number flagged by $REVIEW_REVIEWER_NAME review — needs manual check" "$pr_url"
+  return 1
+}
+
+# Writes the "every reviewer failed" body and its diagnostics comment.
+review_failure_body() {
+  local pr_number="$1"
+  local pr_url="$2"
+  local failure_body diagnostics_body attempt
+
+  failure_body="**Auto-review failed**: all configured reviewers failed or returned no usable review.
+
+Attempted reviewers:"
+  for attempt in "${REVIEW_ATTEMPTS[@]}"; do
+    failure_body="$failure_body
+- $attempt"
+  done
+  failure_body="$failure_body
+
+Please review this backup manually before merging."
+
+  write_pr_body "$pr_number" "$failure_body"
+  if [[ "${#REVIEW_DIAGNOSTICS[@]}" -gt 0 || "${#REVIEW_NORMALIZATIONS[@]}" -gt 0 ]]; then
+    diagnostics_body="$(build_review_diagnostics_body \
+      "none" \
+      "none" \
+      "none" \
+      "$(lines_from_array "${REVIEW_DIAGNOSTICS[@]}")" \
+      "$(lines_from_array "${REVIEW_NORMALIZATIONS[@]}")")"
+    upsert_review_diagnostics_comment "$pr_number" "$diagnostics_body"
+  fi
+  notify_error "AI review failed — PR #$pr_number left open" "$pr_url"
+}
+
+# Runs the configured reviewers and models against one batch until one returns a
+# usable review. Sets REVIEW_TEXT and the REVIEW_* attribution variables and
+# returns 0, or returns 1 once every reviewer has failed. Diagnostics accumulate
+# across batches so the PR comment reports the whole run.
+review_one_batch() {
+  local diff="$1"
+  local changed_paths="$2"
+  local prompt="$3"
+  local repo_root="$4"
+  local reviewers=()
+  local models=()
+  local reviewer model reasoning review try_output try_exit
+  local model_index reviewer_name actual_model actual_model_file detail_file
+  local auxiliary_models auxiliary_models_file
+  local raw_detail detail normalized_review_file normalization_file normalization_detail
+  local missing_paths coverage_detail reviewer_link footer
 
   while IFS= read -r reviewer; do
     [[ -n "$reviewer" ]] && reviewers+=("$reviewer")
@@ -1445,8 +1617,8 @@ review_pr() {
         if ! normalize_review_output "$normalized_review_file.raw" "$normalized_review_file" "$normalization_file"; then
           normalization_detail="$(cat "$normalization_file" 2>/dev/null)"
           [[ -n "$normalization_detail" ]] || normalization_detail="invalid verdict format"
-          attempts+=("$reviewer_name ($model): invalid review output ($normalization_detail)")
-          diagnostics+=("$reviewer_name (\`$model\`): invalid review output, $normalization_detail")
+          REVIEW_ATTEMPTS+=("$reviewer_name ($model): invalid review output ($normalization_detail)")
+          REVIEW_DIAGNOSTICS+=("$reviewer_name (\`$model\`): invalid review output, $normalization_detail")
           rm -f "$actual_model_file" "$detail_file" "$auxiliary_models_file" "$normalized_review_file" "$normalized_review_file.raw" "$normalization_file"
           echo "  ↳ $reviewer_name ($model) returned invalid review output, trying next reviewer/model..." >&2
           continue
@@ -1454,8 +1626,8 @@ review_pr() {
 
         if ! missing_paths="$(review_coverage_gaps "$changed_paths" "$normalized_review_file")"; then
           coverage_detail="$(review_coverage_detail "$missing_paths" "$changed_paths")"
-          attempts+=("$reviewer_name ($model): incomplete review, $coverage_detail")
-          diagnostics+=("$reviewer_name (\`$model\`): incomplete review, $coverage_detail")
+          REVIEW_ATTEMPTS+=("$reviewer_name ($model): incomplete review, $coverage_detail")
+          REVIEW_DIAGNOSTICS+=("$reviewer_name (\`$model\`): incomplete review, $coverage_detail")
           rm -f "$actual_model_file" "$detail_file" "$auxiliary_models_file" "$normalized_review_file" "$normalized_review_file.raw" "$normalization_file"
           echo "  ↳ $reviewer_name ($model) left changed files out of its review, trying next reviewer/model..." >&2
           continue
@@ -1464,7 +1636,7 @@ review_pr() {
         review="$(cat "$normalized_review_file" 2>/dev/null)"
         normalization_detail="$(cat "$normalization_file" 2>/dev/null)"
         if [[ -n "$normalization_detail" ]]; then
-          normalizations+=("$reviewer_name (\`$model\`): $normalization_detail")
+          REVIEW_NORMALIZATIONS+=("$reviewer_name (\`$model\`): $normalization_detail")
         fi
         rm -f "$normalized_review_file" "$normalized_review_file.raw" "$normalization_file"
 
@@ -1486,30 +1658,13 @@ review_pr() {
         fi
         rm -f "$actual_model_file" "$detail_file" "$auxiliary_models_file"
 
-        write_pr_body "$pr_number" "$review
-
----
-$footer"
-
-        if [[ "${#diagnostics[@]}" -gt 0 || "${#normalizations[@]}" -gt 0 ]]; then
-          diagnostics_body="$(build_review_diagnostics_body \
-            "$reviewer_name" \
-            "$model" \
-            "$actual_model" \
-            "$(lines_from_array "${diagnostics[@]}")" \
-            "$(lines_from_array "${normalizations[@]}")" \
-            "$auxiliary_models")"
-          upsert_review_diagnostics_comment "$pr_number" "$diagnostics_body"
-        else
-          delete_review_diagnostics_comment "$pr_number"
-        fi
-
-        if [[ "$verdict" == "APPROVED" ]]; then
-          return 0
-        fi
-
-        notify_error "PR #$pr_number flagged by $reviewer_name review — needs manual check" "$pr_url"
-        return 1
+        REVIEW_TEXT="$review"
+        REVIEW_FOOTER="$footer"
+        REVIEW_REVIEWER_NAME="$reviewer_name"
+        REVIEW_MODEL="$model"
+        REVIEW_ACTUAL_MODEL="$actual_model"
+        REVIEW_AUX_MODELS="$auxiliary_models"
+        return 0
       fi
 
       raw_detail="$(cat "$detail_file" 2>/dev/null)"
@@ -1517,14 +1672,14 @@ $footer"
       [[ -n "$detail" ]] || detail="no diagnostic detail"
 
       if [[ $try_exit -eq 127 ]]; then
-        attempts+=("$reviewer_name ($model): CLI not found")
-        diagnostics+=("$reviewer_name (\`$model\`): CLI not found")
+        REVIEW_ATTEMPTS+=("$reviewer_name ($model): CLI not found")
+        REVIEW_DIAGNOSTICS+=("$reviewer_name (\`$model\`): CLI not found")
       elif [[ -z "$try_output" ]]; then
-        attempts+=("$reviewer_name ($model): empty response, exit=$try_exit, $detail")
-        diagnostics+=("$reviewer_name (\`$model\`): failed, exit=$try_exit, $detail")
+        REVIEW_ATTEMPTS+=("$reviewer_name ($model): empty response, exit=$try_exit, $detail")
+        REVIEW_DIAGNOSTICS+=("$reviewer_name (\`$model\`): failed, exit=$try_exit, $detail")
       else
-        attempts+=("$reviewer_name ($model): $(printf '%s\n' "$try_output" | first_review_line), exit=$try_exit, $detail")
-        diagnostics+=("$reviewer_name (\`$model\`): failed, exit=$try_exit, $detail")
+        REVIEW_ATTEMPTS+=("$reviewer_name ($model): $(printf '%s\n' "$try_output" | first_review_line), exit=$try_exit, $detail")
+        REVIEW_DIAGNOSTICS+=("$reviewer_name (\`$model\`): failed, exit=$try_exit, $detail")
       fi
       rm -f "$actual_model_file" "$detail_file" "$auxiliary_models_file"
       if [[ $try_exit -eq $REVIEW_EXIT_NONRETRYABLE || $try_exit -eq 127 ]]; then
@@ -1535,29 +1690,60 @@ $footer"
     done
   done
 
-  local failure_body="**Auto-review failed**: all configured reviewers failed or returned no usable review.
-
-Attempted reviewers:"
-  for try_output in "${attempts[@]}"; do
-    failure_body="$failure_body
-- $try_output"
-  done
-  failure_body="$failure_body
-
-Please review this backup manually before merging."
-
-  write_pr_body "$pr_number" "$failure_body"
-  if [[ "${#diagnostics[@]}" -gt 0 || "${#normalizations[@]}" -gt 0 ]]; then
-    diagnostics_body="$(build_review_diagnostics_body \
-      "none" \
-      "none" \
-      "none" \
-      "$(lines_from_array "${diagnostics[@]}")" \
-      "$(lines_from_array "${normalizations[@]}")")"
-    upsert_review_diagnostics_comment "$pr_number" "$diagnostics_body"
-  fi
-  notify_error "AI review failed — PR #$pr_number left open" "$pr_url"
   return 1
+}
+
+# Ask GitHub to merge after required checks finish. Wait up to ten minutes for
+# the final result before notifying the user. Only sync the device branch after
+# GitHub reports a completed merge. Return 0 for merged, 2 for still pending,
+# 3 for failed checks before merge, 4 for failed checks after merge, or 1 for
+# a failed request or device-branch sync.
+merge_reviewed_pr() {
+  local pr_number="$1"
+  local device_branch="$2"
+  local wait_seconds="${3:-600}"
+  local start_seconds="$SECONDS"
+  local state checks expected_check all_checks_seen
+
+  gh pr merge "$pr_number" --auto --squash > /dev/null 2>&1 || return 1
+
+  while :; do
+    state=$(gh pr view "$pr_number" --json state --jq '.state' 2>/dev/null) || return 1
+    case "$state" in
+      MERGED|OPEN) ;;
+      *) return 1 ;;
+    esac
+
+    # `gh pr checks` returns nonzero while checks are pending or failed, but
+    # still emits their names and buckets. Inspect the result before timeout.
+    checks=$(gh pr checks "$pr_number" --json name,bucket --jq '.[] | [.name,.bucket] | @tsv' 2>/dev/null) || true
+    if [[ "$checks" == *$'\tfail'* || "$checks" == *$'\tcancel'* ]]; then
+      [[ "$state" == MERGED ]] && return 4
+      return 3
+    fi
+
+    # Until the ruleset requires these checks, GitHub can merge before every
+    # workflow has reported. Do not treat a partial set as CI success.
+    all_checks_seen=true
+    for expected_check in \
+      "Export, scan, and check syntax" \
+      "Check syntax and backup wiring" \
+      "Test private tree" \
+      "Test exported tree"; do
+      [[ "$checks" == *"$expected_check"$'\t'* ]] || all_checks_seen=false
+    done
+    if [[ "$state" == MERGED && "$all_checks_seen" == true && "$checks" != *$'\tpending'* ]]; then
+      break
+    fi
+    if (( SECONDS - start_seconds >= wait_seconds )); then
+      return 2
+    fi
+    sleep 10
+  done
+
+  git fetch origin main > /dev/null 2>&1 || return 1
+  git reset --hard origin/main > /dev/null 2>&1 || return 1
+  git push -f origin "$device_branch" > /dev/null 2>&1 || return 1
 }
 
 if [[ "${DOTFILES_AUTOBACKUP_SOURCE_ONLY:-}" == true ]]; then
@@ -1866,20 +2052,33 @@ if [[ ("$MAIN_PC" == true || "$PR_ONLY" == true) && -n "$PUSHED" ]]; then
     notify_success "$OUTPUT" "$PR_URL"
     echo "$OUTPUT"
   elif [[ "$REVIEW_PASSED" == true ]]; then
-    # --main-pc: merge only if review passed
-    if gh pr merge "$PR_NUMBER" --squash > /dev/null 2>&1; then
-      # Sync device branch to main after squash merge
-      git fetch origin main > /dev/null 2>&1
-      git reset --hard origin/main > /dev/null 2>&1
-      git push -f origin "$DEVICE_BRANCH" > /dev/null 2>&1
-
-      OUTPUT="$OUTPUT | merged to main (#$PR_NUMBER)"
-      notify_success "$OUTPUT" "$PR_URL"
-      echo "$OUTPUT"
-    else
-      notify_error "PR #$PR_NUMBER merge failed — merge manually" "$PR_URL"
-      echo "$OUTPUT"
-    fi
+    # --main-pc: request auto-merge only if review passed.
+    merge_status=0
+    merge_reviewed_pr "$PR_NUMBER" "$DEVICE_BRANCH" || merge_status=$?
+    case "$merge_status" in
+      0)
+        OUTPUT="$OUTPUT | merged to main (#$PR_NUMBER)"
+        notify_success "$OUTPUT" "$PR_URL"
+        echo "$OUTPUT"
+        ;;
+      2)
+        OUTPUT="Backup pushed to $DEVICE_BRANCH; PR #$PR_NUMBER still open after 10 minutes — check GitHub"
+        notify_pending "$OUTPUT" "$PR_URL"
+        echo "$OUTPUT"
+        ;;
+      3)
+        notify_error "PR #$PR_NUMBER GitHub checks failed — auto-merge blocked" "$PR_URL"
+        echo "Backup remains on $DEVICE_BRANCH; PR #$PR_NUMBER has failed checks"
+        ;;
+      4)
+        notify_error "PR #$PR_NUMBER merged before GitHub checks failed — inspect main" "$PR_URL"
+        echo "PR #$PR_NUMBER merged with failed checks; device branch not reset"
+        ;;
+      *)
+        notify_error "PR #$PR_NUMBER auto-merge or device sync failed — check PR" "$PR_URL"
+        echo "$OUTPUT"
+        ;;
+    esac
   else
     # --main-pc but review failed: leave PR open
     OUTPUT="$OUTPUT | PR #$PR_NUMBER awaiting review"

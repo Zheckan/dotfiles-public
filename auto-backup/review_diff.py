@@ -19,15 +19,33 @@ import json
 import re
 import sys
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 # A changed line longer than this is a candidate for the structural JSON diff.
 LONG_LINE_CHARS = 4000
+# A review is split into batches of about this many diff lines. Batching is not
+# only for diffs too big to send at once: a reviewer handed 8 files accounts for
+# them, where one handed 200 skims. PR #288 was auto-merged on a review that
+# reported "5 files reviewed" for a 16-file PR.
+BATCH_DIFF_LINES = 1500
+# Above this many lines the diff is not reviewed at all, batched or otherwise.
+# The largest legitimate backup in this repo's history is 12,301 lines, so a
+# diff past this size means a tool wrote a tree into a backed-up directory
+# rather than that this much configuration changed. PR #291 reached 80,710 lines
+# after claude.ai skill sync wrote 209 vendored files into the backup.
+MAX_DIFF_LINES = 30000
+# Directories listed in the whole-PR summary each batch carries.
+SHAPE_DIRECTORIES = 20
+# `split` exit status when the diff was too large to send to a reviewer.
+OVERSIZED_STATUS = 3
 # Keys tried, in order, to match list entries between the old and new versions.
 LIST_IDENTITY_KEYS = (("identifier", "id"), ("id",), ("name",), ("key",))
 
 USAGE = """usage:
   review_diff.py prepare DIFF_FILE OUTPUT_FILE PATHS_FILE
+  review_diff.py split DIFF_FILE OUTPUT_DIR
+  review_diff.py merge REVIEW_FILE [REVIEW_FILE...]
   review_diff.py coverage PATHS_FILE REVIEW_FILE"""
 
 
@@ -263,14 +281,234 @@ def manifest(files: list[FileDiff]) -> list[str]:
     return lines
 
 
-def prepare(diff_text: str) -> tuple[str, list[str]]:
+def plural(count: int, noun: str) -> str:
+    return f"{count} {noun}" if count == 1 else f"{count} {noun}s"
+
+
+def pr_shape(files: list[FileDiff], total_lines: int, batch_count: int) -> list[str]:
+    """Summarizes the whole PR by directory for a reviewer that sees one batch.
+
+    A synced tree split across batches looks like a few benign files to each
+    reviewer. Only the whole-PR view shows dozens of new files under one
+    directory, which is the signal the review prompt tells reviewers to act on.
+    """
+    # Count every ancestor, since a synced tree spreads one file per skill
+    # directory and only a shared ancestor like `skills/synced/` shows its size.
+    counts: dict[str, list[int]] = {}
+    for file in files:
+        parts = file.path.split("/")[:-1]
+        for depth in range(1, len(parts) + 1):
+            entry = counts.setdefault("/".join(parts[:depth]) + "/", [0, 0])
+            entry[0] += 1
+            entry[1] += file.status == "A"
+
+    # An ancestor holding exactly the files of one child says nothing new.
+    redundant = set()
+    for directory, (count, _) in counts.items():
+        parent = directory[:-1].rpartition("/")[0]
+        if parent and counts[parent + "/"][0] == count:
+            redundant.add(parent + "/")
+
+    ranked = sorted(
+        ((d, c) for d, c in counts.items() if d not in redundant),
+        key=lambda item: (-item[1][0], item[0]),
+    )
+    lines = [
+        f"# Whole PR: {plural(len(files), 'file')}, {total_lines} diff lines,"
+        f" {batch_count} batches",
+        "",
+        "Context only, for patterns no single batch can show, such as a synced"
+        " third-party tree. Your file table covers this batch's manifest, not this list.",
+        "",
+    ]
+    for directory, (count, added) in ranked[:SHAPE_DIRECTORIES]:
+        note = f" ({added} new)" if added else ""
+        lines.append(f"- {directory}: {plural(count, 'file')}{note}")
+    if len(ranked) > SHAPE_DIRECTORIES:
+        lines.append(f"- … {len(ranked) - SHAPE_DIRECTORIES} more directories")
+    return lines + [""]
+
+
+def pack(files: list[FileDiff], batch_lines: int) -> list[list[FileDiff]]:
+    """Groups files into batches without ever splitting one file across two.
+
+    A reviewer that sees half a file cannot judge it, so a file whose own diff
+    exceeds the budget becomes a batch by itself rather than being cut.
+    """
+    groups: list[list[FileDiff]] = []
+    current: list[FileDiff] = []
+    used = 0
+    for file in files:
+        size = len(file.lines)
+        if current and used + size > batch_lines:
+            groups.append(current)
+            current, used = [], 0
+        current.append(file)
+        used += size
+    if current:
+        groups.append(current)
+    return groups
+
+
+def prepare(diff_text: str, max_lines: int = MAX_DIFF_LINES) -> tuple[str, list[str], bool]:
+    """Returns one reviewer input covering the whole diff, and whether it was too large.
+
+    An oversized diff keeps its manifest and drops the body: the manifest is what
+    a human needs to see which tree exploded, and no reviewer should be asked to
+    approve a diff it can only partly read.
+    """
+    batches, oversized = split_batches(diff_text, batch_lines=max_lines, max_lines=max_lines)
+    text, paths = batches[0]
+    return text, paths, oversized
+
+
+def split_batches(
+    diff_text: str,
+    batch_lines: int = BATCH_DIFF_LINES,
+    max_lines: int = MAX_DIFF_LINES,
+) -> tuple[list[tuple[str, list[str]]], bool]:
+    """Returns the per-batch reviewer inputs and whether the diff was too large.
+
+    Each batch carries its own manifest, so the coverage check holds every batch
+    to the files it was actually given.
+    """
     preamble, files = split_files(diff_text)
     for file in files:
         compact_single_line_json(file)
 
-    diff_lines = preamble + [line for file in files for line in file.lines]
-    review_input = "\n".join(manifest(files) + ["", "# Diff", ""] + diff_lines)
-    return review_input, [file.path for file in files]
+    total = len(preamble) + sum(len(file.lines) for file in files)
+    if total > max_lines:
+        note = [
+            "",
+            f"# Diff omitted: {total} lines exceeds the {max_lines}-line review limit",
+            "",
+        ]
+        return [("\n".join(manifest(files) + note), [file.path for file in files])], True
+
+    groups = pack(files, batch_lines) or [[]]
+    shape = pr_shape(files, total, len(groups)) if len(groups) > 1 else []
+    batches: list[tuple[str, list[str]]] = []
+    for index, group in enumerate(groups, start=1):
+        header: list[str] = []
+        if len(groups) > 1:
+            header = [
+                f"# Batch {index} of {len(groups)}",
+                "",
+                "This is one part of a larger PR, split so every file gets read. Review"
+                " only the files in the manifest below; the other batches are covered"
+                " separately.",
+                "",
+                *shape,
+            ]
+        body = (preamble if index == 1 else []) + [line for file in group for line in file.lines]
+        batches.append(
+            (
+                "\n".join(header + manifest(group) + ["", "# Diff", ""] + body),
+                [file.path for file in group],
+            )
+        )
+    return batches, False
+
+
+def sections(review: str) -> tuple[str, dict[str, list[str]]]:
+    """Splits a review into its verdict and its `### ` sections."""
+    lines = review.split("\n")
+    verdict = lines[0].strip() if lines else ""
+    found: dict[str, list[str]] = {}
+    name = ""
+    for line in lines[1:]:
+        if line.startswith("### "):
+            name = line[4:].strip()
+            found.setdefault(name, [])
+        elif name:
+            found[name].append(line)
+    return verdict, found
+
+
+def section_body(found: dict[str, list[str]], prefix: str) -> list[str]:
+    for name, body in found.items():
+        if name.lower().startswith(prefix.lower()):
+            return body
+    return []
+
+
+def merge_reviews(reviews: list[str]) -> str:
+    """Combines per-batch reviews into one body.
+
+    A batch that requests changes decides the whole PR: each batch saw a
+    different slice, so the one that found a problem is the one with evidence.
+    """
+    if len(reviews) == 1:
+        return reviews[0]
+
+    parsed = [sections(review) for review in reviews]
+    # This verdict gates auto-merge, so approval must be unanimous and explicit.
+    verdict = (
+        "APPROVED"
+        if all(v == "APPROVED" for v, _ in parsed)
+        else "CHANGES_REQUESTED"
+    )
+
+    summaries: list[str] = []
+    scores: list[int] = []
+    rows: list[str] = []
+    risks: list[str] = []
+    issues: list[str] = []
+    reviewed = comments = 0
+
+    for index, (_, found) in enumerate(parsed, start=1):
+        text = " ".join(line.strip() for line in section_body(found, "Summary")).strip()
+        if text:
+            summaries.append(f"**Batch {index}.** {text}")
+
+        for name in found:
+            match = re.search(r"Confidence Score:\s*(\d+)\s*/\s*5", name)
+            if match:
+                scores.append(int(match.group(1)))
+
+        for line in section_body(found, "Important Files Changed"):
+            stripped = line.strip()
+            if stripped.startswith("|") and not re.fullmatch(r"\|[\s|:-]+\|", stripped):
+                if not re.match(r"\|\s*Filename\s*\|", stripped):
+                    rows.append(stripped)
+            tally = re.search(r"(\d+)\s+files? reviewed,\s*(\d+)\s+comments?", stripped)
+            if tally:
+                reviewed += int(tally.group(1))
+                comments += int(tally.group(2))
+
+        for prefix, bucket in (("Potential risks", risks), ("Issues", issues)):
+            body = " ".join(line.strip() for line in section_body(found, prefix)).strip()
+            if body and body.lower().rstrip(".") != "none identified":
+                bucket.append(f"**Batch {index}.** {body}")
+
+    score = min(scores) if scores else 1
+    return "\n".join(
+        [
+            verdict,
+            "",
+            "### Summary",
+            f"Reviewed in {len(reviews)} batches so every file was read in full.",
+            "",
+            *summaries,
+            "",
+            f"### Confidence Score: {score}/5",
+            f"Lowest score across {len(reviews)} batches.",
+            "",
+            "### Important Files Changed",
+            "",
+            "| Filename | Score | Overview |",
+            "|----------|-------|----------|",
+            *rows,
+            "",
+            f"{reviewed} files reviewed, {comments} comments",
+            "",
+            "### Potential risks",
+            *(risks or ["None identified."]),
+            "",
+            "### Issues",
+            *(issues or ["None identified."]),
+        ]
+    )
 
 
 def glob_regex(pattern: str) -> re.Pattern[str]:
@@ -323,11 +561,34 @@ def main(argv: list[str] | None = None) -> int:
     if len(args) == 4 and args[0] == "prepare":
         _, diff_file, output_file, paths_file = args
         with open(diff_file, "r", encoding="utf-8") as fh:
-            review_input, paths = prepare(fh.read())
+            review_input, paths, oversized = prepare(fh.read())
         with open(output_file, "w", encoding="utf-8") as fh:
             fh.write(review_input)
         with open(paths_file, "w", encoding="utf-8") as fh:
             fh.write("".join(path + "\n" for path in paths))
+        return OVERSIZED_STATUS if oversized else 0
+
+    if len(args) == 3 and args[0] == "split":
+        _, diff_file, output_dir = args
+        with open(diff_file, "r", encoding="utf-8") as fh:
+            batches, oversized = split_batches(fh.read())
+        directory = Path(output_dir)
+        directory.mkdir(parents=True, exist_ok=True)
+        for index, (text, paths) in enumerate(batches, start=1):
+            stem = directory / f"batch-{index:03d}"
+            stem.with_suffix(".input").write_text(text, encoding="utf-8")
+            stem.with_suffix(".paths").write_text(
+                "".join(path + "\n" for path in paths), encoding="utf-8"
+            )
+        print(len(batches))
+        return OVERSIZED_STATUS if oversized else 0
+
+    if len(args) >= 2 and args[0] == "merge":
+        reviews = []
+        for path in args[1:]:
+            with open(path, "r", encoding="utf-8") as fh:
+                reviews.append(fh.read().rstrip("\n"))
+        print(merge_reviews(reviews))
         return 0
 
     if len(args) == 3 and args[0] == "coverage":

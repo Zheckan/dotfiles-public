@@ -169,7 +169,7 @@ model's privacy terms: Muse Spark Contributor permits training on prompts and ou
 | Flag | Description |
 |---|---|
 | *(none)* | Use required `auto-backup/config.local.toml` |
-| `--main-pc` | Full flow: rebase, backup, review, PR, merge to main |
+| `--main-pc` | Full flow: rebase, backup, review, PR, request merge to main |
 | `--pr-only` | Same as `--main-pc` but without merge (review + PR only) |
 | `--test` | Test mode: stay on current dev branch, push, create PR, review (no backup, no merge) |
 | `--no-rebase` | Skip rebase on main. Combinable with any flag above |
@@ -187,13 +187,13 @@ order. A retired reviewer flag exits with migration guidance.
 | Commit & push | Configured | Yes | Yes | No |
 | Create/find PR | Configured | Yes | Yes | Yes |
 | AI review | Configured | Yes | Yes | Yes |
-| Squash-merge | Configured | Yes | No | No |
+| Request squash-merge | Configured | Yes | No | No |
 
 ```bash
 # Configured default from auto-backup/config.local.toml
 "$DOTFILES_REPO_DIR/auto-backup/run-backup.sh"
 
-# Override config for one run: full flow with review and merge
+# Override config for one run: full flow with review and merge request
 "$DOTFILES_REPO_DIR/auto-backup/run-backup.sh" --main-pc
 
 # PR without merge: backup + review + PR (leaves PR open)
@@ -218,10 +218,20 @@ order. A retired reviewer flag exits with migration guidance.
 2. Runs `backup.sh` to capture current configs
 3. Creates a PR (or reuses an existing open one)
 4. Reviews the PR diff with the configured AI reviewer chain
-5. If approved → squash-merges the PR and resets device branch to `main`
+5. If approved → requests squash auto-merge and watches the PR for up to ten
+   minutes. It alerts on failed GitHub checks. Once GitHub reports the merge
+   and the checks finish, it syncs the device branch to `main`. If the PR or
+   checks are still pending after ten minutes, it sends a pending alert and
+   leaves the device branch intact. A
+   later backup run picks up the merged `main` before capturing current configs.
 6. If flagged → leaves PR open, writes the review to the PR description, sends notification
 
 If anything fails (rebase conflict, push failure, PR error, review rejection), a macOS notification alerts you. Clicking the notification opens the PR in your browser (requires `terminal-notifier`). The backup remains safe on the device branch.
+
+If checks finish during that wait, the macOS notification reports their outcome.
+To receive a separate alert if a GitHub Actions workflow fails after the wait
+ends, watch this repository and enable failed-workflow notifications in your
+GitHub notification settings.
 
 ## PR Review
 

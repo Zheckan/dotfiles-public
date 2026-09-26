@@ -74,7 +74,7 @@ class PrepareTests(unittest.TestCase):
         new = profile(extension("tldraw-org.tldraw-vscode", "2.353.0"))
         raw = single_line_json_diff(PROFILE_PATH, json.dumps(old), json.dumps(new))
 
-        review_input, paths = review_diff.prepare(raw)
+        review_input, paths, _ = review_diff.prepare(raw)
 
         self.assertEqual(paths, [PROFILE_PATH])
         self.assertIn(
@@ -92,7 +92,7 @@ class PrepareTests(unittest.TestCase):
             PROFILE_PATH, json.dumps(profile(removed)), json.dumps(profile(added))
         )
 
-        review_input, _ = review_diff.prepare(raw)
+        review_input, _, _ = review_diff.prepare(raw)
 
         self.assertIn(f'+ $[identifier.id="new.publisher-ext"]: {json.dumps(added)}', review_input)
         self.assertIn(f'- $[identifier.id="old.publisher-ext"]: {json.dumps(removed)}', review_input)
@@ -104,7 +104,7 @@ class PrepareTests(unittest.TestCase):
             PROFILE_PATH, json.dumps(profile(first, second)), json.dumps(profile(second, first))
         )
 
-        review_input, _ = review_diff.prepare(raw)
+        review_input, _, _ = review_diff.prepare(raw)
 
         self.assertIn("~ $: shared entries reordered", review_input)
 
@@ -113,13 +113,13 @@ class PrepareTests(unittest.TestCase):
         truncated = old_text[: len(old_text) // 2]
         raw = single_line_json_diff(PROFILE_PATH, old_text, truncated)
 
-        review_input, _ = review_diff.prepare(raw)
+        review_input, _, _ = review_diff.prepare(raw)
 
         self.assertIn("+" + truncated, review_input)
         self.assertNotIn("structural JSON diff", review_input)
 
     def test_short_multi_line_diff_is_unchanged(self) -> None:
-        review_input, paths = review_diff.prepare(SETTINGS_DIFF)
+        review_input, paths, _ = review_diff.prepare(SETTINGS_DIFF)
 
         self.assertEqual(paths, ["apps/editors/vscode/settings.json"])
         self.assertIn(SETTINGS_DIFF, review_input)
@@ -139,7 +139,7 @@ class PrepareTests(unittest.TestCase):
             ]
         )
 
-        review_input, paths = review_diff.prepare(raw)
+        review_input, paths, _ = review_diff.prepare(raw)
 
         self.assertEqual(paths, ["cli/new.conf", "cli/old.conf", "fonts/b.txt", "fonts/My Font.ttf"])
         self.assertTrue(review_input.startswith("# Changed files (4)\n"))
@@ -150,6 +150,239 @@ class PrepareTests(unittest.TestCase):
             "- M fonts/My Font.ttf (+0/-0)",
         ):
             self.assertIn(line, review_input)
+
+
+def vendored_tree_diff(count: int) -> str:
+    """A backup that swept in a vendored tree, as PR #291 did with synced skills."""
+    return "".join(
+        "diff --git a/{p} b/{p}\nnew file mode 100644\n"
+        "index 0000000..1111111\n--- /dev/null\n+++ b/{p}\n"
+        "@@ -0,0 +1,3 @@\n+one\n+two\n+three\n".format(
+            p=f"apps/ai-tools/claude/skills/synced/bucket/skill-{index}/SKILL.md"
+        )
+        for index in range(count)
+    )
+
+
+def batch_review(
+    verdict: str,
+    score: int,
+    path: str,
+    risks: str = "None identified.",
+    issues: str = "None identified.",
+) -> str:
+    return "\n".join(
+        [
+            verdict,
+            "",
+            "### Summary",
+            f"Reviewed {path}.",
+            "",
+            f"### Confidence Score: {score}/5",
+            "Routine.",
+            "",
+            "### Important Files Changed",
+            "",
+            "| Filename | Score | Overview |",
+            "|----------|-------|----------|",
+            f"| {path} | {score}/5 | Fine. |",
+            "",
+            "1 files reviewed, 0 comments",
+            "",
+            "### Potential risks",
+            risks,
+            "",
+            "### Issues",
+            issues,
+        ]
+    )
+
+
+class OversizedDiffTests(unittest.TestCase):
+    def test_diff_under_the_limit_keeps_its_body(self) -> None:
+        review_input, paths, oversized = review_diff.prepare(
+            vendored_tree_diff(3), max_lines=100
+        )
+
+        self.assertFalse(oversized)
+        self.assertEqual(len(paths), 3)
+        self.assertIn("# Diff", review_input)
+        self.assertIn("+one", review_input)
+
+    def test_oversized_diff_keeps_the_manifest_and_drops_the_body(self) -> None:
+        review_input, paths, oversized = review_diff.prepare(
+            vendored_tree_diff(40), max_lines=100
+        )
+
+        self.assertTrue(oversized)
+        self.assertEqual(len(paths), 40)
+        # The manifest is the part a human needs: it names the tree that exploded.
+        self.assertTrue(review_input.startswith("# Changed files (40)\n"))
+        self.assertIn("skills/synced/bucket/skill-39/SKILL.md", review_input)
+        self.assertIn("exceeds the 100-line review limit", review_input)
+        # No reviewer should receive a body it can only partly read.
+        self.assertNotIn("+one", review_input)
+
+    def test_a_diff_that_fits_stays_one_batch_without_batch_headers(self) -> None:
+        batches, oversized = review_diff.split_batches(
+            vendored_tree_diff(3), batch_lines=100
+        )
+
+        self.assertFalse(oversized)
+        self.assertEqual(len(batches), 1)
+        self.assertNotIn("# Batch", batches[0][0])
+
+    def test_batches_split_on_file_boundaries_and_cover_every_path(self) -> None:
+        # 9 lines per file, so a 20-line budget takes two files per batch.
+        batches, oversized = review_diff.split_batches(
+            vendored_tree_diff(7), batch_lines=20
+        )
+
+        self.assertFalse(oversized)
+        self.assertEqual([len(paths) for _, paths in batches], [2, 2, 2, 1])
+        covered = [path for _, paths in batches for path in paths]
+        self.assertEqual(len(covered), 7)
+        self.assertEqual(len(set(covered)), 7)
+        for index, (text, paths) in enumerate(batches, start=1):
+            self.assertIn(f"# Batch {index} of 4", text)
+            # Each batch's manifest holds it to the files it was actually given.
+            self.assertIn(f"# Changed files ({len(paths)})", text)
+            for path in paths:
+                self.assertIn(path, text)
+
+    def test_every_batch_shows_the_shape_of_the_whole_pr(self) -> None:
+        # A synced tree split across batches looks like a handful of benign files
+        # to each reviewer; only the whole-PR view shows 7 new files in one place.
+        raw = vendored_tree_diff(7) + single_line_json_diff(
+            "apps/editors/vscode/settings.json", '{"a": 1}', '{"a": 2}'
+        )
+
+        batches, _ = review_diff.split_batches(raw, batch_lines=20)
+
+        self.assertGreater(len(batches), 1)
+        for text, _ in batches:
+            self.assertIn("# Whole PR: 8 files", text)
+            self.assertIn(
+                "- apps/ai-tools/claude/skills/synced/bucket/: 7 files (7 new)", text
+            )
+            self.assertIn("- apps/editors/vscode/: 1 file", text)
+
+    def test_whole_pr_summary_lists_only_the_busiest_directories(self) -> None:
+        raw = "".join(
+            vendored_tree_diff(1).replace(
+                "apps/ai-tools/claude/skills/synced/bucket/skill-0", f"dir-{index}"
+            )
+            for index in range(30)
+        )
+
+        batches, _ = review_diff.split_batches(raw, batch_lines=20)
+
+        text = batches[0][0]
+        self.assertEqual(text.count("/: 1 file"), review_diff.SHAPE_DIRECTORIES)
+        self.assertIn(f"{30 - review_diff.SHAPE_DIRECTORIES} more directories", text)
+
+    def test_a_file_larger_than_the_budget_becomes_its_own_batch(self) -> None:
+        raw = single_line_json_diff(
+            "apps/editors/vscode/settings.json", '{"a": 1}', '{"a": 2}'
+        ) + vendored_tree_diff(1)
+
+        batches, oversized = review_diff.split_batches(raw, batch_lines=2)
+
+        self.assertFalse(oversized)
+        self.assertEqual(len(batches), 2)
+        self.assertEqual([len(paths) for _, paths in batches], [1, 1])
+
+    def test_split_command_writes_one_input_and_paths_file_per_batch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            diff_file = root / "diff"
+            diff_file.write_text(vendored_tree_diff(7), encoding="utf-8")
+
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                status = review_diff.main(["split", str(diff_file), str(root / "batches")])
+
+            self.assertEqual(status, 0)
+            self.assertEqual(out.getvalue().strip(), "1")
+            self.assertTrue((root / "batches" / "batch-001.input").exists())
+            self.assertEqual(
+                len((root / "batches" / "batch-001.paths").read_text().splitlines()), 7
+            )
+
+    def test_single_batch_review_passes_through_untouched(self) -> None:
+        review = batch_review("APPROVED", 5, "`a.json`", risks="None identified.")
+
+        self.assertEqual(review_diff.merge_reviews([review]), review)
+
+    def test_one_batch_requesting_changes_decides_the_whole_pr(self) -> None:
+        merged = review_diff.merge_reviews(
+            [
+                batch_review("APPROVED", 5, "`a.json`"),
+                batch_review("CHANGES_REQUESTED", 2, "`b.json`", issues="Secret found."),
+                batch_review("APPROVED", 4, "`c.json`"),
+            ]
+        )
+
+        self.assertTrue(merged.startswith("CHANGES_REQUESTED\n"))
+        self.assertIn("Secret found.", merged)
+        # The lowest confidence wins, not an average that would hide the outlier.
+        self.assertIn("### Confidence Score: 2/5", merged)
+
+    def test_a_batch_without_a_clear_approval_blocks_the_merge(self) -> None:
+        # The merged verdict gates auto-merge, so anything short of every batch
+        # approving must request changes rather than default to approval.
+        merged = review_diff.merge_reviews(
+            [
+                batch_review("APPROVED", 5, "`a.json`"),
+                batch_review("LGTM", 5, "`b.json`"),
+            ]
+        )
+
+        self.assertTrue(merged.startswith("CHANGES_REQUESTED\n"))
+
+    def test_merge_keeps_every_file_row_and_sums_the_tally(self) -> None:
+        merged = review_diff.merge_reviews(
+            [
+                batch_review("APPROVED", 5, "`a.json`"),
+                batch_review("APPROVED", 5, "`b.json`"),
+            ]
+        )
+
+        self.assertIn("| `a.json` | 5/5 | Fine. |", merged)
+        self.assertIn("| `b.json` | 5/5 | Fine. |", merged)
+        self.assertIn("2 files reviewed, 0 comments", merged)
+        # One header row only, not one per batch.
+        self.assertEqual(merged.count("|----------|-------|----------|"), 1)
+
+    def test_merge_drops_none_identified_when_another_batch_found_something(self) -> None:
+        merged = review_diff.merge_reviews(
+            [
+                batch_review("APPROVED", 5, "`a.json`", risks="None identified."),
+                batch_review("APPROVED", 3, "`b.json`", risks="New PATH entry."),
+            ]
+        )
+
+        risks = merged.split("### Potential risks")[1].split("### Issues")[0]
+        self.assertIn("New PATH entry.", risks)
+        self.assertNotIn("None identified.", risks)
+
+    def test_prepare_command_reports_oversized_with_a_distinct_status(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            diff_file, output_file, paths_file = (
+                root / "diff",
+                root / "out",
+                root / "paths",
+            )
+            diff_file.write_text(vendored_tree_diff(4000), encoding="utf-8")
+
+            status = review_diff.main(
+                ["prepare", str(diff_file), str(output_file), str(paths_file)]
+            )
+
+            self.assertEqual(status, review_diff.OVERSIZED_STATUS)
+            # The files are still written, so the caller can report the manifest.
+            self.assertIn("# Changed files (4000)", output_file.read_text(encoding="utf-8"))
+            self.assertEqual(len(paths_file.read_text(encoding="utf-8").splitlines()), 4000)
 
 
 # The body AGY gemini-3.1-pro-high wrote for PR #288, which reported
