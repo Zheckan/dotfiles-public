@@ -37,6 +37,7 @@ run_backup "AI Tools — Claude"     "$DOTFILES_DIR/apps/ai-tools/claude/backup.
 run_backup "AI Tools — Codex"      "$DOTFILES_DIR/apps/ai-tools/codex/backup.sh"
 run_backup "AI Tools — Antigravity" "$DOTFILES_DIR/apps/ai-tools/antigravity/backup.sh"
 run_backup "AI Tools — OpenCode"   "$DOTFILES_DIR/apps/ai-tools/opencode/backup.sh"
+run_backup "AI Tools — Pi"         "$DOTFILES_DIR/apps/ai-tools/pi/backup.sh"
 run_backup "AI Tools — Agent Skills" "$DOTFILES_DIR/apps/ai-tools/agents/backup.sh"
 run_backup "AI Tools — T3 Code"    "$DOTFILES_DIR/apps/ai-tools/t3code/backup.sh"
 run_backup "SSH"                   "$DOTFILES_DIR/cli/ssh/backup.sh"
