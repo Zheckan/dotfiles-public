@@ -10,6 +10,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 "$SCRIPT_DIR/codex/install.sh"
 "$SCRIPT_DIR/antigravity/install.sh"
 "$SCRIPT_DIR/opencode/install.sh"
+"$SCRIPT_DIR/pi/install.sh"
 "$SCRIPT_DIR/t3code/install.sh"
 
 print_manual_steps
