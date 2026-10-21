@@ -168,10 +168,14 @@ def extract_text(protocol: str, payload: object) -> str:
         elif isinstance(payload.get("output"), list):
             parts: list[str] = []
             for item in payload["output"]:
-                if not isinstance(item, dict) or not isinstance(item.get("content"), list):
+                if not isinstance(item, dict) or not isinstance(
+                    item.get("content"), list
+                ):
                     continue
                 for content in item["content"]:
-                    if isinstance(content, dict) and isinstance(content.get("text"), str):
+                    if isinstance(content, dict) and isinstance(
+                        content.get("text"), str
+                    ):
                         parts.append(content["text"])
             text = "\n".join(parts)
     elif protocol == "chat":
@@ -261,6 +265,52 @@ def run_inference(
     return extract_text(protocol_for_model(model), payload)
 
 
+# Catalog variant lists can disagree with what the endpoints accept, so a
+# rejected level steps down the standard effort ladder toward provider default.
+REASONING_LADDER = ("max", "xhigh", "high", "medium", "low")
+
+
+def next_lower_reasoning(level: str) -> str | None:
+    if level == "default":
+        return None
+    if level in REASONING_LADDER:
+        position = REASONING_LADDER.index(level)
+        return (
+            REASONING_LADDER[position + 1]
+            if position + 1 < len(REASONING_LADDER)
+            else "default"
+        )
+    return "default"
+
+
+def reasoning_retriable(error: AdapterError) -> bool:
+    # Only step down on failures a lower effort could plausibly fix: an
+    # explicitly rejected request, or reasoning consuming the whole token
+    # budget so no prose was produced. Auth/account/network errors stay fatal.
+    message = str(error)
+    return message.startswith(("HTTP 400", "HTTP 404", "HTTP 422")) or (
+        "contained no text" in message
+    )
+
+
+def run_review(
+    model: str,
+    prompt: str,
+    api_key: str,
+    max_tokens: int,
+    reasoning: str = "default",
+) -> str:
+    level = normalize_reasoning(reasoning)
+    while True:
+        try:
+            return run_inference(model, prompt, api_key, max_tokens, level)
+        except AdapterError as error:
+            lower = next_lower_reasoning(level)
+            if lower is None or not reasoning_retriable(error):
+                raise
+            level = lower
+
+
 def read_env_key(path: Path) -> str:
     try:
         metadata = path.lstat()
@@ -338,7 +388,7 @@ def main() -> None:
             fail(f"cannot read review prompt: {error}")
         reasoning = sys.argv[4] if len(sys.argv) == 5 else "default"
         print(
-            run_inference(
+            run_review(
                 sys.argv[2],
                 prompt,
                 os.environ.get(ENV_KEY, ""),

@@ -134,8 +134,8 @@ REASONING_REVIEWERS = {"claude", "codex", "opencode", "opencode-go-api"}
 CLAUDE_ALIAS_REASONING = {
     "fable": ("low", "medium", "high", "xhigh", "max"),
     "opus": ("low", "medium", "high", "xhigh", "max"),
-    "sonnet": ("low", "medium", "high", "max"),
-    "haiku": ("off", "on"),
+    "sonnet": ("low", "medium", "high", "xhigh", "max"),
+    "haiku": ("low", "medium", "high", "xhigh", "max", "off", "on"),
 }
 LEGACY_CLAUDE_EFFORTS = {"low", "medium", "high", "xhigh", "max"}
 
@@ -256,9 +256,7 @@ def opencode_choices_from_verbose(output: str) -> list[Choice]:
     """Parse `opencode models --verbose` without guessing model variants."""
     decoder = json.JSONDecoder()
     choices: list[Choice] = []
-    model_line = re.compile(
-        r"(?m)^([A-Za-z0-9][A-Za-z0-9._/-]*/[A-Za-z0-9._/-]+)\n"
-    )
+    model_line = re.compile(r"(?m)^([A-Za-z0-9][A-Za-z0-9._/-]*/[A-Za-z0-9._/-]+)\n")
     for match in model_line.finditer(output):
         try:
             metadata, _ = decoder.raw_decode(output, match.end())
@@ -282,6 +280,62 @@ def opencode_choices_from_verbose(output: str) -> list[Choice]:
             )
         )
     return choices
+
+
+def opencode_choices_from_api(output: str) -> dict[str, Choice]:
+    """Parse the OpenCode CLI V2 server catalog (`opencode api GET /api/model`)."""
+    payload = json.loads(output)
+    data = payload.get("data") if isinstance(payload, dict) else payload
+    if not isinstance(data, list):
+        raise ValueError("model catalog did not contain a data list")
+    choices: dict[str, Choice] = {}
+    for entry in data:
+        if not isinstance(entry, dict):
+            continue
+        provider = entry.get("providerID")
+        model = entry.get("modelID")
+        if not isinstance(provider, str) or not isinstance(model, str):
+            continue
+        variants = entry.get("variants")
+        levels = (
+            tuple(
+                variant["id"]
+                for variant in variants
+                if isinstance(variant, dict) and isinstance(variant.get("id"), str)
+            )
+            if isinstance(variants, list)
+            else ()
+        )
+        key = f"{provider}/{model}"
+        choices[key] = Choice(key, key, key, reasoning_levels=levels)
+    return choices
+
+
+def opencode_catalog() -> dict[str, Choice] | None:
+    """Model catalog with reasoning variants, for OpenCode CLI V1 and V2 alike.
+
+    V1 exposes variants through `models --refresh --verbose`; V2 dropped that
+    format and serves the catalog over its server API instead. Returns None
+    when no variants-capable source is reachable so callers can fall back to
+    a plain, variant-less listing.
+    """
+    try:
+        output = run_command(["opencode", "models", "--refresh", "--verbose"])
+        catalog = {
+            choice.value: choice for choice in opencode_choices_from_verbose(output)
+        }
+        if catalog:
+            return catalog
+    except (FileNotFoundError, subprocess.SubprocessError, ValueError):
+        pass
+    try:
+        output = run_command(["opencode", "api", "GET", "/api/model"])
+        catalog = opencode_choices_from_api(output)
+        if catalog:
+            return catalog
+    except (FileNotFoundError, subprocess.SubprocessError, ValueError):
+        pass
+    return None
 
 
 def discover_models(reviewer: str, api_key: str = "") -> tuple[list[Choice], str]:
@@ -310,7 +364,7 @@ def discover_models(reviewer: str, api_key: str = "") -> tuple[list[Choice], str
                     Choice(
                         "haiku",
                         "Haiku stable alias",
-                        "Fast stable alias. Reasoning is an on/off thinking toggle.",
+                        "Fast stable alias. Supports effort levels; the legacy on/off thinking toggle remains.",
                         reasoning_levels=CLAUDE_ALIAS_REASONING["haiku"],
                     ),
                     Choice(
@@ -325,10 +379,13 @@ def discover_models(reviewer: str, api_key: str = "") -> tuple[list[Choice], str
             output = run_command(["agy", "models"])
             choices = choices_from_lines(output)
         elif reviewer == "opencode":
-            output = run_command(
-                ["opencode", "models", "--refresh", "--verbose"]
-            )
-            choices = opencode_choices_from_verbose(output)
+            catalog = opencode_catalog()
+            if catalog is None:
+                # Last resort on both versions: a plain listing without variants.
+                output = run_command(["opencode", "models"])
+                choices = choices_from_lines(output)
+            else:
+                choices = list(catalog.values())
         elif reviewer == "codex":
             payload = json.loads(run_command(["codex", "debug", "models"]))
             choices = []
@@ -340,8 +397,7 @@ def discover_models(reviewer: str, api_key: str = "") -> tuple[list[Choice], str
                 levels = tuple(
                     entry["effort"]
                     for entry in model.get("supported_reasoning_levels", [])
-                    if isinstance(entry, dict)
-                    and isinstance(entry.get("effort"), str)
+                    if isinstance(entry, dict) and isinstance(entry.get("effort"), str)
                 )
                 choices.append(
                     Choice(
@@ -353,29 +409,12 @@ def discover_models(reviewer: str, api_key: str = "") -> tuple[list[Choice], str
                 )
         elif reviewer == "opencode-go-api":
             models = opencode_go.list_models(api_key)
-            catalog: dict[str, Choice] = {}
-            variants_note = (
-                " OpenCode CLI is unavailable, so reasoning stays at provider default."
-            )
-            try:
-                output = run_command(
-                    [
-                        "opencode",
-                        "models",
-                        "opencode-go",
-                        "--refresh",
-                        "--verbose",
-                    ]
-                )
-                catalog = {
-                    choice.value: choice
-                    for choice in opencode_choices_from_verbose(output)
-                }
-                variants_note = (
-                    " Reasoning variants loaded from the OpenCode catalog."
-                )
-            except (FileNotFoundError, subprocess.SubprocessError, ValueError):
-                pass
+            # The Go /models response carries no reasoning metadata. Variants
+            # come from the OpenCode catalog (V1 verbose or V2 server API);
+            # without it, offer the standard effort ladder — the review
+            # adapter steps down automatically when a level is rejected.
+            catalog = opencode_catalog() or {}
+            standard = ("low", "medium", "high", "xhigh", "max")
             choices = []
             for model in models:
                 catalog_choice = catalog.get(model)
@@ -387,15 +426,19 @@ def discover_models(reviewer: str, api_key: str = "") -> tuple[list[Choice], str
                         reasoning_levels=(
                             catalog_choice.reasoning_levels
                             if catalog_choice is not None
-                            else ()
+                            else standard
                         ),
                     )
                 )
-            return choices, (
-                "Live model list loaded from the OpenCode Go API." + variants_note
+            return choices, "Live model list loaded from the OpenCode Go API." + (
+                " Reasoning variants loaded from the OpenCode catalog."
+                if catalog
+                else " OpenCode's model catalog is unavailable; using the standard reasoning ladder with automatic step-down on rejection."
             )
         else:
-            return [Choice("default", "Configured default", "Experimental selector.")], (
+            return [
+                Choice("default", "Configured default", "Experimental selector.")
+            ], (
                 "This reviewer is experimental and fails closed during unattended review."
             )
     except (
@@ -442,10 +485,9 @@ def load_state(path: Path = CONFIG_FILE) -> tuple[SetupState, str]:
             raise ValueError(f"unsupported backup mode {mode!r}")
         if not isinstance(rebase, bool) or not isinstance(enabled, bool):
             raise ValueError("backup.rebase and review.enabled must be booleans")
-        if (
-            any(reviewer not in allowed_reviewers for reviewer in reviewers)
-            or len(reviewers) != len(set(reviewers))
-        ):
+        if any(reviewer not in allowed_reviewers for reviewer in reviewers) or len(
+            reviewers
+        ) != len(set(reviewers)):
             raise ValueError("review.reviewers contains invalid or duplicate values")
         for reviewer in reviewers:
             configured = models.get(reviewer)
@@ -510,7 +552,10 @@ def load_state(path: Path = CONFIG_FILE) -> tuple[SetupState, str]:
             "",
         )
     except (KeyError, OSError, TypeError, ValueError, tomllib.TOMLDecodeError) as error:
-        return SetupState(), f"Existing config could not be loaded; using safe defaults: {error}"
+        return (
+            SetupState(),
+            f"Existing config could not be loaded; using safe defaults: {error}",
+        )
 
 
 def toml_array(values: list[str]) -> str:
@@ -636,7 +681,9 @@ class Wizard:
         self.screen.erase()
         height, width = self.screen.getmaxyx()
         if height < 18 or width < 68:
-            self.add(0, 0, "Terminal is too small. Resize to at least 68x18.", curses.A_BOLD)
+            self.add(
+                0, 0, "Terminal is too small. Resize to at least 68x18.", curses.A_BOLD
+            )
             self.screen.refresh()
             return 3
         self.add(0, 2, "Auto-backup setup", curses.A_BOLD | curses.color_pair(1))
@@ -658,7 +705,9 @@ class Wizard:
             "Cancel setup?",
             [
                 Choice("no", "Return to setup", "Keep editing without saving yet."),
-                Choice("yes", "Cancel without saving", "Leave existing files unchanged."),
+                Choice(
+                    "yes", "Cancel without saving", "Leave existing files unchanged."
+                ),
             ],
             "no",
             allow_back=False,
@@ -677,7 +726,9 @@ class Wizard:
         allow_back: bool = True,
         allow_cancel: bool = True,
     ) -> str:
-        index = next((i for i, choice in enumerate(choices) if choice.value == initial), 0)
+        index = next(
+            (i for i, choice in enumerate(choices) if choice.value == initial), 0
+        )
         while True:
             y = self.frame(title, subtitle)
             for item_index, choice in enumerate(choices):
@@ -687,7 +738,9 @@ class Wizard:
                     style |= curses.color_pair(1)
                 self.add(y + item_index, 4, f"{marker} {choice.label}", style)
             detail_y = y + len(choices) + 1
-            self.add(detail_y, 2, "What this does", curses.A_BOLD | curses.color_pair(1))
+            self.add(
+                detail_y, 2, "What this does", curses.A_BOLD | curses.color_pair(1)
+            )
             self.wrapped(detail_y + 1, choices[index].description, 0, 4)
             self.footer("↑↓ choose  •  Enter confirm  •  Esc back  •  Q cancel")
             self.screen.refresh()
@@ -746,9 +799,7 @@ class Wizard:
             for row, choice in enumerate(visible):
                 item_index = offset + row
                 order = (
-                    selected.index(choice.value) + 1
-                    if choice.value in selected
-                    else 0
+                    selected.index(choice.value) + 1 if choice.value in selected else 0
                 )
                 marker = f"[{order}]" if order else "[ ]"
                 style = curses.color_pair(2) if order else 0
@@ -762,8 +813,10 @@ class Wizard:
                     if reasoning is not None
                     else "default"
                 )
-                if reasoning is not None and order and (
-                    choice.reasoning_levels or configured_reasoning != "default"
+                if (
+                    reasoning is not None
+                    and order
+                    and (choice.reasoning_levels or configured_reasoning != "default")
                 ):
                     reasoning_label = f" [{configured_reasoning}]"
                 self.add(
@@ -794,9 +847,13 @@ class Wizard:
                     )
                 ]
             ]
-            order_text = " → ".join(
-                f"{position}. {label}" for position, label in enumerate(selected_labels, 1)
-            ) or "Nothing selected"
+            order_text = (
+                " → ".join(
+                    f"{position}. {label}"
+                    for position, label in enumerate(selected_labels, 1)
+                )
+                or "Nothing selected"
+            )
             self.add(
                 detail_y,
                 2,
@@ -809,9 +866,7 @@ class Wizard:
             if message:
                 self.add(height - 3, 2, message, curses.color_pair(4))
             manual_help = "  •  M manual ID" if allow_manual else ""
-            highlighted_levels = (
-                choices[index].reasoning_levels if choices else ()
-            )
+            highlighted_levels = choices[index].reasoning_levels if choices else ()
             reasoning_help = "  •  R reasoning" if highlighted_levels else ""
             self.footer(
                 f"↑↓ navigate  •  Space select/remove  •  ←→ reorder"
@@ -843,9 +898,7 @@ class Wizard:
                     message = "Select this model before changing its reasoning level."
                 else:
                     current = (
-                        reasoning.get(model, "default")
-                        if reasoning
-                        else "default"
+                        reasoning.get(model, "default") if reasoning else "default"
                     )
                     current_index = (
                         reasoning_levels.index(current)
@@ -889,7 +942,9 @@ class Wizard:
                 y = self.frame(
                     title,
                     "Paste the OpenCode Zen API key. It is never displayed or passed "
-                    "as a command-line argument." if secret else "Enter a model identifier.",
+                    "as a command-line argument."
+                    if secret
+                    else "Enter a model identifier.",
                 )
                 shown = "•" * len(value) if secret else "".join(value)
                 self.add(y, 4, "> " + shown, curses.color_pair(1))
@@ -936,7 +991,9 @@ class Wizard:
         while True:
             if key:
                 model = self.state.models["opencode-go-api"][0]
-                self.status("Validating OpenCode Go", f"Testing {model} using {source}…")
+                self.status(
+                    "Validating OpenCode Go", f"Testing {model} using {source}…"
+                )
                 try:
                     validate_go_key(model, key)
                 except opencode_go.AdapterError as error:
@@ -950,7 +1007,11 @@ class Wizard:
             action = self.select_one(
                 "OpenCode Go credential",
                 [
-                    Choice("retry", "Enter a different API key", "Validate another Zen Go key."),
+                    Choice(
+                        "retry",
+                        "Enter a different API key",
+                        "Validate another Zen Go key.",
+                    ),
                     Choice(
                         "remove",
                         "Remove OpenCode Go and continue",
@@ -961,7 +1022,11 @@ class Wizard:
                         "Back to Go model selection",
                         "Choose a different primary model before validating again.",
                     ),
-                    Choice("cancel", "Cancel setup", "Leave existing configuration unchanged."),
+                    Choice(
+                        "cancel",
+                        "Cancel setup",
+                        "Leave existing configuration unchanged.",
+                    ),
                 ],
                 "retry",
                 subtitle=problem or "No OpenCode Go API key is configured.",
@@ -982,9 +1047,7 @@ class Wizard:
                 raise Cancelled
 
     def summary(self) -> bool:
-        reviewer_labels = {
-            choice.value: choice.label for choice in REVIEWERS
-        }
+        reviewer_labels = {choice.value: choice.label for choice in REVIEWERS}
         lines = [
             f"Mode: {next(choice.label for choice in MODES if choice.value == self.state.mode)}",
             f"Rebase before backup: {'yes' if self.state.rebase else 'no'}",
@@ -1012,9 +1075,17 @@ class Wizard:
         choice = self.select_one(
             "Review and save",
             [
-                Choice("save", "Save configuration", "Atomically write config.local.toml."),
-                Choice("back", "Back to setup", "Return to the first screen and adjust choices."),
-                Choice("cancel", "Cancel without saving", "Leave existing files unchanged."),
+                Choice(
+                    "save", "Save configuration", "Atomically write config.local.toml."
+                ),
+                Choice(
+                    "back",
+                    "Back to setup",
+                    "Return to the first screen and adjust choices.",
+                ),
+                Choice(
+                    "cancel", "Cancel without saving", "Leave existing files unchanged."
+                ),
             ],
             "save",
             subtitle="\n".join(lines),
@@ -1213,9 +1284,7 @@ class Wizard:
                         "opencode-go/" if reviewer == "opencode-go-api" else ""
                     ),
                     reasoning=(
-                        self.state.reasoning[reviewer]
-                        if supports_reasoning
-                        else None
+                        self.state.reasoning[reviewer] if supports_reasoning else None
                     ),
                 )
                 if models is None:
