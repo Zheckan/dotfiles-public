@@ -72,8 +72,8 @@ REASONING_LEVELS = {
 CLAUDE_MODEL_REASONING_LEVELS = {
     "fable": {"default", "low", "medium", "high", "xhigh", "max"},
     "opus": {"default", "low", "medium", "high", "xhigh", "max"},
-    "sonnet": {"default", "low", "medium", "high", "max"},
-    "haiku": {"default", "off", "on"},
+    "sonnet": {"default", "low", "medium", "high", "xhigh", "max"},
+    "haiku": {"default", "off", "on", "low", "medium", "high", "xhigh", "max"},
     "default": {"default"},
 }
 LEGACY_CLAUDE_EFFORTS = {"low", "medium", "high", "xhigh", "max"}
@@ -112,7 +112,9 @@ def require_string(table: dict, key: str, location: str) -> str:
     return value
 
 
-def require_string_list(value: object, location: str, *, allow_empty: bool) -> list[str]:
+def require_string_list(
+    value: object, location: str, *, allow_empty: bool
+) -> list[str]:
     if not isinstance(value, list) or (not allow_empty and not value):
         qualifier = "a list" if allow_empty else "a non-empty list"
         fail(f"{location} must be {qualifier}")
@@ -179,9 +181,7 @@ def load_config(path: Path) -> dict[str, str]:
             fail(f"review.reasoning.{reviewer} must be a table")
         configured_models = parsed_models.get(reviewer)
         if configured_models is None:
-            fail(
-                f"review.reasoning.{reviewer} requires review.models.{reviewer}"
-            )
+            fail(f"review.reasoning.{reviewer} requires review.models.{reviewer}")
         reject_unknown_keys(
             configured_reasoning,
             set(configured_models),
@@ -191,9 +191,7 @@ def load_config(path: Path) -> dict[str, str]:
         for model, level in configured_reasoning.items():
             if not isinstance(level, str) or level not in REASONING_LEVELS[reviewer]:
                 allowed = ", ".join(sorted(REASONING_LEVELS[reviewer]))
-                fail(
-                    f"review.reasoning.{reviewer}.{model} must be one of {allowed}"
-                )
+                fail(f"review.reasoning.{reviewer}.{model} must be one of {allowed}")
             model_levels = (
                 CLAUDE_MODEL_REASONING_LEVELS.get(model)
                 if reviewer == "claude"
@@ -207,9 +205,7 @@ def load_config(path: Path) -> dict[str, str]:
                     level = "default"
                 else:
                     allowed = ", ".join(sorted(model_levels))
-                    fail(
-                        f"review.reasoning.claude.{model} must be one of {allowed}"
-                    )
+                    fail(f"review.reasoning.claude.{model} must be one of {allowed}")
             parsed_reasoning[reviewer][model] = level
 
     if enabled:

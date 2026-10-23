@@ -114,11 +114,13 @@ Cursor and Ollama are experimental selectors that fail closed.
 
 For every selected reviewer, setup loads the models currently exposed by that CLI and
 asks for the primary model followed by any fallbacks. AGY uses `agy models`, OpenCode
-refreshes its provider-aware catalog with `opencode models --refresh --verbose`, and
+probes for the catalog source matching the installed CLI generation — V1's
+`opencode models --refresh --verbose`, then V2's `opencode api GET /api/model`, then a
+plain variant-less `opencode models` listing — and
 Codex uses the machine-readable `codex debug models` catalog. Claude Code has no supported
 machine-readable model-list command, so setup offers its stable aliases plus manual
 entry. The Go API fetches `https://opencode.ai/zen/go/v1/models`; when OpenCode CLI
-is installed, its verbose Go-provider catalog supplies the corresponding reasoning
+is installed, its catalog supplies the corresponding reasoning
 variants. Selected IDs are persisted; unattended backups do not refresh catalogs or
 change model order.
 
@@ -135,8 +137,9 @@ Supported explicit values remain pinned. If the earlier reviewer-wide Claude pic
 saved an effort that the selected stable alias does not support, it is safely treated
 as `default`; rerun setup only if you want to choose an explicit supported value.
 
-Claude effort values are passed through `claude --effort`; Haiku's toggle uses the
-documented thinking setting or `CLAUDE_CODE_DISABLE_THINKING`. Codex uses its
+Claude effort values are passed through `claude --effort`, including Haiku; the
+legacy Haiku on/off toggle uses the documented thinking setting or
+`CLAUDE_CODE_DISABLE_THINKING`. Codex uses its
 `model_reasoning_effort` override. OpenCode CLI uses the selected catalog variant.
 The direct Go adapter translates the same OpenCode Go effort name to the documented
 Responses, Chat Completions, or Messages request shape.
@@ -144,7 +147,11 @@ Responses, Chat Completions, or Messages request shape.
 AGY model IDs already include their effort variant, such as
 `gemini-3.8-flash-high`, so setup does not add a second reasoning selector for AGY.
 OpenCode variants are provider- and model-specific. If a selected variant is not
-supported, that attempt fails and the normal model/reviewer fallback continues.
+supported, that attempt fails and the normal model/reviewer fallback continues. The
+Go adapter is more forgiving: a rejected reasoning level steps down the standard
+ladder (`max`, `xhigh`, `high`, `medium`, `low`) toward the provider default before
+the attempt is reported as failed, and the Go model screen offers that same standard
+ladder whenever the OpenCode catalog cannot supply per-model variants.
 
 OpenCode CLI and OpenCode Go direct API are separate choices. The CLI reuses provider
 credentials configured in OpenCode. The direct adapter sends the PR diff to documented
@@ -280,10 +287,10 @@ Supported reviewers:
 
 | Reviewer | Status | Command used |
 |---|---|---|
-| Claude | Default, tested | `claude -p --effort LEVEL` or Haiku thinking toggle |
+| Claude | Default, tested | `claude -p --effort LEVEL` (legacy Haiku on/off thinking toggle still accepted) |
 | Codex | Tested | `codex exec --sandbox read-only -c model_reasoning_effort=LEVEL` |
 | AGY | Tested | `agy --input-format stream-json --output-format stream-json --mode plan --sandbox` |
-| OpenCode CLI | Tested | `opencode run --format json --agent plan --variant LEVEL` |
+| OpenCode CLI | Tested | V1: `opencode run --format json --agent plan --variant LEVEL`; V2: `-m provider/model#variant` with the repo as cwd |
 | OpenCode Go direct API | Tested offline; requires Go key | `opencode_go.py` with protocol-specific reasoning over documented HTTPS endpoints |
 | Cursor | Experimental, untested | Selector exists, but fails closed |
 | Ollama | Experimental, untested | Selector exists, but fails closed |

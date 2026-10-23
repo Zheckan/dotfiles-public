@@ -75,8 +75,8 @@ claude = ["haiku"]
 haiku = "high"
 TOML
   output="$(python3 "$SCRIPT_DIR/config.py" "$config")"
-  [[ "$output" == *$'DOTFILES_REVIEW_CLAUDE_REASONING\tdefault'* ]] ||
-    fail "legacy incompatible Haiku effort did not fall back to default"
+  [[ "$output" == *$'DOTFILES_REVIEW_CLAUDE_REASONING\thigh'* ]] ||
+    fail "supported Haiku effort was not passed through"
 
   cat > "$config" <<'TOML'
 [backup]
@@ -708,7 +708,12 @@ test_codex_and_opencode_reviews_apply_configured_reasoning() {
   grep -Fxq -- "model_reasoning_effort=\"xhigh\"" "$codex_args" ||
     fail "Codex reasoning override missing"
 
+  unset _OPENCODE_RUN_HELP
   opencode() {
+    if [[ "$1 $2" == "run --help" ]]; then
+      printf '%s\n' 'USAGE' '  opencode run [flags]' '  --variant string    Reasoning variant'
+      return 0
+    fi
     printf '%s\n' "$@" > "$opencode_args"
     cat > /dev/null
     printf '%s\n' '{"type":"text","part":{"id":"review","text":"APPROVED"}}'
@@ -726,6 +731,91 @@ test_codex_and_opencode_reviews_apply_configured_reasoning() {
   assert_eq "APPROVED" "$output" "OpenCode reasoning adapter output"
   grep -Fxq -- "--variant" "$opencode_args" || fail "OpenCode variant flag missing"
   grep -Fxq -- "high" "$opencode_args" || fail "OpenCode variant value missing"
+
+  rm -rf "$work_dir"
+}
+
+test_opencode_v2_review_attaches_variant_to_model() {
+  local work_dir opencode_args actual_model_file detail_file output pwd_file
+  work_dir="$(mktemp -d "${TMPDIR:-/tmp}/dotfiles-opencode-v2-test.XXXXXX")"
+  opencode_args="$work_dir/opencode-args"
+  actual_model_file="$work_dir/model"
+  detail_file="$work_dir/detail"
+  pwd_file="$work_dir/pwd"
+
+  # OpenCode V2 help no longer documents --variant; the adapter must move the
+  # variant into --model provider/model#variant and run in the repo cwd.
+  unset _OPENCODE_RUN_HELP
+  opencode() {
+    if [[ "$1 $2" == "run --help" ]]; then
+      printf '%s\n' 'USAGE' '  opencode run [flags] [<message...>]' \
+        '  --agent string      Agent to use' \
+        '  --model, -m string  Model to use in the format provider/model#variant'
+      return 0
+    fi
+    printf '%s\n' "$@" > "$opencode_args"
+    printf '%s\n' "$(pwd)" > "$pwd_file"
+    cat > /dev/null
+    printf '%s\n' '{"type":"text","part":{"id":"review","text":"APPROVED"}}'
+  }
+  output="$(run_opencode_review \
+    "opencode-go/grok-4.6" \
+    "Apply the review policy." \
+    "diff --git a/file b/file" \
+    "$REPO_DIR" \
+    "$actual_model_file" \
+    "$detail_file" \
+    "high")"
+  unset -f opencode
+
+  assert_eq "APPROVED" "$output" "OpenCode V2 adapter output"
+  grep -Fxq -- "opencode-go/grok-4.6#high" "$opencode_args" ||
+    fail "OpenCode V2 model#variant missing"
+  if grep -Fxq -- "--variant" "$opencode_args"; then
+    fail "OpenCode V2 must not receive the removed --variant flag"
+  fi
+  assert_eq "$REPO_DIR" "$(cat "$pwd_file")" "OpenCode V2 runs in the repo directory"
+
+  rm -rf "$work_dir"
+}
+
+test_claude_haiku_accepts_effort_levels() {
+  local work_dir args_file env_file actual_model_file detail_file output
+  work_dir="$(mktemp -d "${TMPDIR:-/tmp}/dotfiles-claude-haiku-effort-test.XXXXXX")"
+  args_file="$work_dir/args"
+  env_file="$work_dir/env"
+  actual_model_file="$work_dir/model"
+  detail_file="$work_dir/detail"
+
+  claude() {
+    printf '%s\n' "$@" > "$args_file"
+    printf '%s\n%s' \
+      "${CLAUDE_CODE_DISABLE_THINKING:-}" \
+      "${MAX_THINKING_TOKENS:-}" > "$env_file"
+    cat > /dev/null
+    cat <<'JSONL'
+{"type":"assistant","message":{"model":"claude-haiku-4-5","content":[{"type":"text","text":"APPROVED"}]},"parent_tool_use_id":null}
+{"type":"result","subtype":"success","is_error":false,"result":"APPROVED","modelUsage":{"claude-haiku-4-5":{}}}
+JSONL
+  }
+
+  output="$(run_claude_review \
+    "haiku" \
+    "Apply the review policy." \
+    "diff --git a/file b/file" \
+    "$actual_model_file" \
+    "$detail_file" \
+    "" \
+    "high")"
+  unset -f claude
+
+  assert_eq "APPROVED" "$output" "Claude Haiku effort output"
+  grep -Fxq -- "--effort" "$args_file" || fail "Claude Haiku effort flag missing"
+  grep -Fxq -- "high" "$args_file" || fail "Claude Haiku effort value missing"
+  assert_eq "" "$(sed -n '1p' "$env_file")" \
+    "Claude Haiku effort leaves thinking disable flag untouched"
+  assert_eq "" "$(sed -n '2p' "$env_file")" \
+    "Claude Haiku effort leaves thinking budget untouched"
 
   rm -rf "$work_dir"
 }
@@ -1815,7 +1905,9 @@ test_claude_stream_reports_response_and_auxiliary_models
 test_claude_stream_empty_result_uses_final_assistant_message
 test_claude_review_uses_stream_response_model
 test_claude_haiku_uses_thinking_toggle_instead_of_effort
+test_claude_haiku_accepts_effort_levels
 test_codex_and_opencode_reviews_apply_configured_reasoning
+test_opencode_v2_review_attaches_variant_to_model
 test_sanitize_attempt_reason
 test_sanitize_authorization_bearer
 test_sanitize_claude_json_auth_error

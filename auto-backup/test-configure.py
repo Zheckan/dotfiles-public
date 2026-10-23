@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import stat
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -82,9 +83,7 @@ class ConfigureWizardTests(unittest.TestCase):
                 raise AssertionError(f"unexpected separate screen: {title}")
             return answers[title]
 
-        def select_ordered(
-            title: str, *_args: object, **kwargs: object
-        ) -> list[str]:
+        def select_ordered(title: str, *_args: object, **kwargs: object) -> list[str]:
             if title == "Select and order reviewers":
                 return ["claude"]
             if title == "Models for claude":
@@ -121,10 +120,11 @@ class ConfigureWizardTests(unittest.TestCase):
         choices, _ = configure.discover_models("claude")
         levels = {choice.value: choice.reasoning_levels for choice in choices}
 
-        self.assertEqual(levels["haiku"], ("off", "on"))
         self.assertEqual(
-            levels["opus"], ("low", "medium", "high", "xhigh", "max")
+            levels["haiku"],
+            ("low", "medium", "high", "xhigh", "max", "off", "on"),
         )
+        self.assertEqual(levels["opus"], ("low", "medium", "high", "xhigh", "max"))
         self.assertEqual(levels["default"], ())
 
     def test_codex_discovery_reads_reasoning_levels_from_model_catalog(self) -> None:
@@ -159,9 +159,7 @@ opencode-go/kimi-k3
             choices, _ = configure.discover_models("opencode")
 
         levels = {choice.value: choice.reasoning_levels for choice in choices}
-        self.assertEqual(
-            levels["opencode-go/grok-4.6"], ("low", "high", "xhigh")
-        )
+        self.assertEqual(levels["opencode-go/grok-4.6"], ("low", "high", "xhigh"))
         self.assertEqual(levels["opencode-go/kimi-k3"], ("max",))
 
     def test_opencode_discovery_keeps_provider_in_visible_labels(self) -> None:
@@ -209,9 +207,7 @@ openai/gpt-5.4
             },
             reasoning={
                 "codex": {"gpt-5.6-sol": "high"},
-                "opencode-go-api": {
-                    "opencode-go/deepseek-v4-flash": "default"
-                },
+                "opencode-go-api": {"opencode-go/deepseek-v4-flash": "default"},
             },
         )
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -223,7 +219,9 @@ openai/gpt-5.4
             self.assertEqual(loaded, state)
             self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
 
-    def test_legacy_config_defaults_cli_reasoning_without_changing_agy_models(self) -> None:
+    def test_legacy_config_defaults_cli_reasoning_without_changing_agy_models(
+        self,
+    ) -> None:
         legacy = """\
 [backup]
 mode = "pr-only"
@@ -252,14 +250,12 @@ opencode-go-api = ["opencode-go/deepseek-v4-flash"]
                 "claude": {"opus": "default"},
                 "codex": {"gpt-5.6-sol": "default"},
                 "opencode": {"opencode-go/grok-4.6": "default"},
-                "opencode-go-api": {
-                    "opencode-go/deepseek-v4-flash": "default"
-                },
+                "opencode-go-api": {"opencode-go/deepseek-v4-flash": "default"},
             },
         )
         self.assertNotIn("agy", loaded.reasoning)
 
-    def test_legacy_generic_claude_effort_is_normalized_for_haiku(self) -> None:
+    def test_legacy_generic_claude_effort_is_kept_for_haiku(self) -> None:
         legacy = """\
 [backup]
 mode = "pr-only"
@@ -281,14 +277,11 @@ haiku = "high"
             loaded, warning = configure.load_state(path)
 
         self.assertEqual(warning, "")
-        self.assertEqual(loaded.reasoning, {"claude": {"haiku": "default"}})
+        self.assertEqual(loaded.reasoning, {"claude": {"haiku": "high"}})
 
     def test_reasoning_choices_only_include_the_selected_models_controls(self) -> None:
         self.assertEqual(
-            [
-                choice.value
-                for choice in configure.reasoning_choices(("low", "high"))
-            ],
+            [choice.value for choice in configure.reasoning_choices(("low", "high"))],
             ["default", "low", "high"],
         )
         self.assertEqual(configure.reasoning_choices(()), [])
@@ -304,9 +297,7 @@ haiku = "high"
         with mock.patch.object(
             configure.opencode_go, "run_inference", return_value="OK"
         ) as run:
-            configure.validate_go_key(
-                "opencode-go/gpt-5.6-luna", "secret-key"
-            )
+            configure.validate_go_key("opencode-go/gpt-5.6-luna", "secret-key")
         self.assertEqual(
             run.call_args.args[-1],
             configure.opencode_go.VALIDATION_MAX_TOKENS,
@@ -314,31 +305,174 @@ haiku = "high"
         self.assertGreaterEqual(run.call_args.args[-1], 16)
 
     def test_go_models_use_live_api_catalog(self) -> None:
-        with mock.patch.object(
-            configure.opencode_go,
-            "list_models",
-            return_value=["opencode-go/deepseek-v4-flash"],
-        ) as list_models, mock.patch.object(
-            configure,
-            "run_command",
-            return_value=(
-                'opencode-go/deepseek-v4-flash\n'
-                '{"name":"DeepSeek V4 Flash",'
-                '"variants":{"low":{},"high":{},"max":{}}}\n'
+        with (
+            mock.patch.object(
+                configure.opencode_go,
+                "list_models",
+                return_value=["opencode-go/deepseek-v4-flash"],
+            ) as list_models,
+            mock.patch.object(
+                configure,
+                "run_command",
+                return_value=(
+                    "opencode-go/deepseek-v4-flash\n"
+                    '{"name":"DeepSeek V4 Flash",'
+                    '"variants":{"low":{},"high":{},"max":{}}}\n'
+                ),
             ),
         ):
-            choices, note = configure.discover_models(
-                "opencode-go-api", "existing-key"
-            )
+            choices, note = configure.discover_models("opencode-go-api", "existing-key")
 
         list_models.assert_called_once_with("existing-key")
-        self.assertEqual([choice.value for choice in choices], [
-            "opencode-go/deepseek-v4-flash"
-        ])
+        self.assertEqual(
+            [choice.value for choice in choices], ["opencode-go/deepseek-v4-flash"]
+        )
         self.assertEqual(choices[0].label, "deepseek-v4-flash")
         self.assertEqual(choices[0].reasoning_levels, ("low", "high", "max"))
         self.assertIn("Live model list", note)
         self.assertIn("Reasoning variants", note)
+
+    def test_opencode_discovery_falls_back_to_v2_server_catalog(self) -> None:
+        # CLI V2 dropped `models --refresh --verbose` and serves the catalog
+        # through `opencode api GET /api/model`.
+        def fake_run_command(command, **_kwargs):
+            if "--verbose" in command:
+                raise subprocess.CalledProcessError(1, command)
+            return configure.json.dumps(
+                {
+                    "data": [
+                        {
+                            "providerID": "opencode-go",
+                            "modelID": "grok-4.6",
+                            "variants": [
+                                {"id": "low"},
+                                {"id": "high"},
+                                {"id": "xhigh"},
+                            ],
+                        },
+                        {"providerID": "openai", "modelID": "gpt-5.4"},
+                    ]
+                }
+            )
+
+        with mock.patch.object(configure, "run_command", side_effect=fake_run_command):
+            choices, _ = configure.discover_models("opencode")
+
+        levels = {choice.value: choice.reasoning_levels for choice in choices}
+        self.assertEqual(levels["opencode-go/grok-4.6"], ("low", "high", "xhigh"))
+        self.assertEqual(levels["openai/gpt-5.4"], ())
+
+    def test_opencode_discovery_falls_back_to_plain_listing(self) -> None:
+        def fake_run_command(command, **_kwargs):
+            if "--verbose" in command or "/api/model" in command:
+                raise subprocess.CalledProcessError(1, command)
+            return "openai/gpt-5.4\n"
+
+        with mock.patch.object(configure, "run_command", side_effect=fake_run_command):
+            choices, _ = configure.discover_models("opencode")
+
+        values = [choice.value for choice in choices]
+        self.assertEqual(
+            [value for value in values if value != "default"], ["openai/gpt-5.4"]
+        )
+        self.assertEqual(choices[-1].reasoning_levels, ())
+
+    def test_go_variants_come_from_v2_server_catalog(self) -> None:
+        def fake_run_command(command, **_kwargs):
+            if "--verbose" in command:
+                raise subprocess.CalledProcessError(1, command)
+            return configure.json.dumps(
+                {
+                    "data": [
+                        {
+                            "providerID": "opencode-go",
+                            "modelID": "deepseek-v4-flash",
+                            "variants": [{"id": "low"}, {"id": "max"}],
+                        }
+                    ]
+                }
+            )
+
+        with (
+            mock.patch.object(
+                configure.opencode_go,
+                "list_models",
+                return_value=["opencode-go/deepseek-v4-flash"],
+            ),
+            mock.patch.object(configure, "run_command", side_effect=fake_run_command),
+        ):
+            choices, note = configure.discover_models("opencode-go-api", "key")
+
+        self.assertEqual(choices[0].reasoning_levels, ("low", "max"))
+        self.assertIn("Reasoning variants", note)
+
+    def test_go_without_catalog_uses_standard_ladder(self) -> None:
+        def fake_run_command(command, **_kwargs):
+            raise subprocess.CalledProcessError(1, command)
+
+        with (
+            mock.patch.object(
+                configure.opencode_go,
+                "list_models",
+                return_value=["opencode-go/deepseek-v4-flash"],
+            ),
+            mock.patch.object(configure, "run_command", side_effect=fake_run_command),
+        ):
+            choices, note = configure.discover_models("opencode-go-api", "key")
+
+        self.assertEqual(
+            choices[0].reasoning_levels, ("low", "medium", "high", "xhigh", "max")
+        )
+        self.assertIn("standard reasoning ladder", note)
+        self.assertNotIn("Reasoning variants", note)
+
+    def test_go_reasoning_steps_down_the_standard_ladder(self) -> None:
+        adapter = configure.opencode_go
+        self.assertEqual(
+            [
+                adapter.next_lower_reasoning(level)
+                for level in ("max", "xhigh", "high", "medium", "low")
+            ],
+            ["xhigh", "high", "medium", "low", "default"],
+        )
+        self.assertEqual(adapter.next_lower_reasoning("none"), "default")
+        self.assertIsNone(adapter.next_lower_reasoning("default"))
+
+    def test_go_review_retries_lower_reasoning_on_rejection(self) -> None:
+        adapter = configure.opencode_go
+        calls = []
+
+        def fake_run_inference(model, prompt, api_key, max_tokens, reasoning="default"):
+            calls.append(reasoning)
+            if reasoning != "high":
+                raise adapter.AdapterError("HTTP 400: unsupported reasoning")
+            return f"OK at {reasoning}"
+
+        with mock.patch.object(
+            adapter, "run_inference", side_effect=fake_run_inference
+        ):
+            result = adapter.run_review(
+                "opencode-go/glm-5.3-flash", "prompt", "key", 64, "xhigh"
+            )
+
+        self.assertEqual(result, "OK at high")
+        self.assertEqual(calls, ["xhigh", "high"])
+
+    def test_go_review_does_not_retry_auth_failures(self) -> None:
+        adapter = configure.opencode_go
+        calls = []
+
+        def fake_run_inference(model, prompt, api_key, max_tokens, reasoning="default"):
+            calls.append(reasoning)
+            raise adapter.AdapterError("HTTP 403")
+
+        with (
+            mock.patch.object(adapter, "run_inference", side_effect=fake_run_inference),
+            self.assertRaises(adapter.AdapterError),
+        ):
+            adapter.run_review("opencode-go/glm-5.3-flash", "prompt", "key", 64, "max")
+
+        self.assertEqual(calls, ["max"])
 
     def test_cancel_exits_without_saving(self) -> None:
         output = StringIO()

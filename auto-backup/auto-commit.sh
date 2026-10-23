@@ -1114,6 +1114,17 @@ with open(review_file, "w", encoding="utf-8") as fh:
 PY
 }
 
+# OpenCode V2 removed the --variant and --dir flags from `run` (variants moved
+# into --model provider/model#variant, the project directory became the cwd),
+# while V1 still expects the separate flags. Probe --help once per run.
+opencode_run_supports() {
+  local flag="$1"
+  if [[ -z "${_OPENCODE_RUN_HELP:-}" ]]; then
+    _OPENCODE_RUN_HELP="$(opencode run --help 2>&1 || true)"
+  fi
+  grep -q -- "$flag" <<<"$_OPENCODE_RUN_HELP"
+}
+
 run_opencode_review() {
   local model="$1"
   local prompt="$2"
@@ -1130,11 +1141,30 @@ run_opencode_review() {
   # OpenCode reports no model id in its run events, so only a model that was
   # requested explicitly can be echoed back; "default" leaves the file empty
   # and the caller falls back to the configured name.
+  # OpenCode V2 removed the --variant and --dir flags: variants moved into
+  # --model provider/model#variant and the project directory became the cwd.
+  # With no model requested on V2 there is nothing to attach a variant to,
+  # so reasoning stays at the provider default. --help is probed once so
+  # both CLI generations keep working.
   if [[ "$model" != "default" ]]; then
-    try_args=(-m "$model")
     printf '%s' "$model" > "$actual_model_file"
+    if [[ "$reasoning" != "default" ]] && ! opencode_run_supports --variant; then
+      try_args=(-m "$model#$reasoning")
+    else
+      try_args=(-m "$model")
+    fi
   fi
-  [[ "$reasoning" != "default" ]] && try_args+=(--variant "$reasoning")
+  if [[ "$reasoning" != "default" ]] && opencode_run_supports --variant; then
+    try_args+=(--variant "$reasoning")
+  fi
+
+  local dir_args=()
+  local run_cwd=""
+  if opencode_run_supports --dir; then
+    dir_args=(--dir "$repo_root")
+  else
+    run_cwd="$repo_root"
+  fi
 
   tmp_json="$(mktemp)"
   tmp_review="$(mktemp)"
@@ -1144,7 +1174,10 @@ run_opencode_review() {
   # agent is configured with "*": "allow", which would let an unattended review
   # edit the repo it is reviewing; this mirrors codex's --sandbox read-only.
   printf '%s' "$diff" \
-    | opencode run --format json --agent plan --dir "$repo_root" "${try_args[@]}" "$prompt" \
+    | (
+        [[ -n "$run_cwd" ]] && cd "$run_cwd"
+        opencode run --format json --agent plan "${dir_args[@]}" "${try_args[@]}" "$prompt"
+      ) \
       > "$tmp_json" 2>"$tmp_error"
   try_exit=$?
 
